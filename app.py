@@ -107,13 +107,43 @@ def standardize_orders_df(df):
     return df, original_cols
 
 def generate_optimized_routes(orders_df, original_columns):
-    # Generăm automat cei 3 curieri stabiliți
+    # Configurație automată curieri
     couriers_data = {
         'Curier_ID': ['C01', 'C02', 'C03'],
         'Nume_curier': ['Curier Principal 1', 'Curier Principal 2', 'Curier Principal 3'],
         'Capacitate_max_livrari': [20, 20, 20]
     }
     active_couriers = pd.DataFrame(couriers_data)
+    
     c_coords = {
         'C01': {'start_lat': 44.4261, 'start_lon': 26.1024, 'end_lat': 44.4261, 'end_lon': 26.1024},
-        'C02': {'start_lat': 44.4325, 'start_lon': 26.100
+        'C02': {'start_lat': 44.4325, 'start_lon': 26.1001, 'end_lat': 44.4325, 'end_lon': 26.1001},
+        'C03': {'start_lat': 44.4011, 'start_lon': 26.1189, 'end_lat': 44.4011, 'end_lon': 26.1189}
+    }
+
+    orders = orders_df.copy()
+    for col in ['Curier', 'Secventa', 'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie', 'Status']:
+        orders[col] = ""
+        orders[col] = orders[col].astype(object)
+
+    with st.spinner("Localizare adrese prin algoritmul de curățare românesc..."):
+        for idx, row in orders.iterrows():
+            lat, lon, geo_addr, id_type = geocode_address_bulletproof(row['Adresa_originala'])
+            orders.at[idx, 'Latitudine'] = lat
+            orders.at[idx, 'Longitudine'] = lon
+            orders.at[idx, 'Geocoded_address'] = str(geo_addr)
+            orders.at[idx, 'Status'] = id_type
+
+    courier_tracks = {c_id: [] for c_id in active_couriers['Curier_ID']}
+    courier_counts = {c_id: 0 for c_id in active_couriers['Curier_ID']}
+    unassigned_orders = orders.to_dict('records')
+    unroutable = pd.DataFrame(columns=orders.columns)
+    
+    while len(unassigned_orders) > 0:
+        best_score = float('inf')
+        best_courier = None
+        best_order_idx = None
+        
+        for idx, ord_item in enumerate(unassigned_orders):
+            for _, c_row in active_couriers.iterrows():
+                c
