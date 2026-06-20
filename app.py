@@ -164,7 +164,6 @@ def generate_optimized_routes(df_orders, df_couriers):
             'end_lat': lat_f or 44.4325, 'end_lon': lon_f or 26.1001
         }
 
-    # FIX: Initialize columns explicitly forcing Object/String types to avoid strict Pandas 3.14 dtype validation crashes
     for col in ['Latitudine', 'Longitudine']:
         if col not in orders.columns:
             orders[col] = np.nan
@@ -352,7 +351,8 @@ if orders_df is not None and couriers_df is not None:
     if st.button("🚀 Generează și Optimizează Traseele", type="primary"):
         routes_res, unrouted_res = generate_optimized_routes(orders_df, couriers_df)
         
-        if routes_res is not None and not routes_res.empty:
+        # FIX: Check if the returned result is a valid filled DataFrame instead of checking dynamic true values directly
+        if routes_res is not None and isinstance(routes_res, pd.DataFrame) and not routes_res.empty:
             st.success("✅ Optimizare Finalizată cu Succes!")
             
             kpi_cols = st.columns(4)
@@ -393,6 +393,7 @@ if orders_df is not None and couriers_df is not None:
                 mime="text/csv"
             )
         else:
-            st.error(routes_res if routes_res else "Eroare necunoscută la generare.")
+            # Safe text error handler representation
+            st.error(unrouted_res if isinstance(unrouted_res, str) else "Eroare necunoscută la generare.")
 else:
     st.info("💡 Vă rugăm să selectați un mod din stânga pentru a începe.")
