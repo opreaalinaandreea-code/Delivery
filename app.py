@@ -107,6 +107,13 @@ def standardize_orders_df(df):
     return df, original_cols
 
 def generate_optimized_routes(orders_df, original_columns):
+    # Generăm automat cei 3 curieri stabiliți
     couriers_data = {
         'Curier_ID': ['C01', 'C02', 'C03'],
-        'Nume_cur
+        'Nume_curier': ['Curier Principal 1', 'Curier Principal 2', 'Curier Principal 3'],
+        'Capacitate_max_livrari': [20, 20, 20]
+    }
+    active_couriers = pd.DataFrame(couriers_data)
+    c_coords = {
+        'C01': {'start_lat': 44.4261, 'start_lon': 26.1024, 'end_lat': 44.4261, 'end_lon': 26.1024},
+        'C02': {'start_lat': 44.4325, 'start_lon': 26.100
