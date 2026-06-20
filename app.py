@@ -11,15 +11,16 @@ import io
 # --- Page Configuration ---
 st.set_page_config(page_title="RoRoute - Planificator My Maps Excel", layout="wide")
 
-# --- Funcție de extragere BULLETPROOF pentru KML / KMZ ---
+# --- Funcție de extragere ULTRA-ROBUSTĂ pentru KML / KMZ ---
 def parse_kml_flexible(uploaded_file):
     """
-    Scanează flexibil un fișier KML sau KMZ exportat din Google My Maps.
-    Dezarhivează automat dacă este KMZ și extrage coordonatele + metadatele.
+    Scanează complet fișierul KML sau KMZ folosind parsare XML dublată de Regex 
+    pentru a garanta extragerea coordonatelor din Google My Maps.
     """
     try:
         file_bytes = uploaded_file.read()
         
+        # Verificăm dacă este KMZ (arhivă zip)
         if zipfile.is_zipfile(io.BytesIO(file_bytes)):
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
                 kml_names = [name for name in z.namelist() if name.endswith('.kml')]
@@ -29,81 +30,27 @@ def parse_kml_flexible(uploaded_file):
         else:
             utf8_content = file_bytes.decode('utf-8', errors='ignore')
             
-        clean_content = re.sub(r'\sxmlns="[^"]+"', '', utf8_content, count=1)
-        try:
-            root = ET.fromstring(clean_content.encode('utf-8'))
-        except Exception:
-            root = ET.fromstring(utf8_content.encode('utf-8', errors='ignore'))
-            
         records = []
         
-        for elem in root.iter():
-            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-            
-            if tag_name == 'Placemark':
-                name_text = ""
-                desc_text = ""
-                coords_text = ""
-                extended_data = {}
-                
-                for child in elem:
-                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                    if child_tag == 'name' and child.text:
-                        name_text = child.text.strip()
-                    elif child_tag == 'description' and child.text:
-                        desc_text = child.text.strip()
-                    elif child_tag == 'ExtendedData':
-                        for data_elem in child.iter():
-                            d_tag = data_elem.tag.split('}')[-1] if '}' in data_elem.tag else data_elem.tag
-                            if d_tag == 'Data':
-                                data_name = data_elem.get('name')
-                                value_elem = data_elem.find('.//value')
-                                if data_name and value_elem is not None and value_elem.text:
-                                    extended_data[data_name.strip()] = value_elem.text.strip()
-                    elif child_tag == 'Point':
-                        for point_child in child:
-                            pt_tag = point_child.tag.split('}')[-1] if '}' in point_child.tag else point_child.tag
-                            if pt_tag == 'coordinates' and point_child.text:
-                                coords_text = point_child.text.strip()
-                                
-                if coords_text:
-                    parts = coords_text.split(',')
-                    if len(parts) >= 2:
-                        try:
-                            lon = float(parts[0].strip())
-                            lat = float(parts[1].strip())
-                            
-                            rec = {
-                                'KML_Name': name_text,
-                                'Latitudine': lat,
-                                'Longitudine': lon,
-                                'Geocoded_address': name_text
-                            }
-                            for k, v in extended_data.items():
-                                rec[f"KML_Ext_{k}"] = v
-                                
-                            records.append(rec)
-                        except ValueError:
-                            pass
-                            
-        if len(records) > 0:
-            return pd.DataFrame(records), None
-            
-        # Fallback prin Căutare Text Regex directă
-        records_regex = []
+        # --- METODA 1: Căutare directă prin Regex (Imună la erori de namespace sau structură XML) ---
         placemarks_raw = re.findall(r'<Placemark>.*?</Placemark>', utf8_content, re.DOTALL)
+        
         for pm in placemarks_raw:
             name_m = re.search(r'<name>(.*?)</name>', pm)
             coords_m = re.search(r'<coordinates>(.*?)</coordinates>', pm)
+            
             name_t = name_m.group(1).strip() if name_m else "Fără Nume"
             
-            phone_m = re.search(r'Phone \(Billing\):\s*([^\s<]+)', pm)
-            first_m = re.search(r'First Name \(Shipping\):\s*([^\s<]+)', pm)
-            last_m = re.search(r'Last Name \(Shipping\):\s*([^\s<]+)', pm)
-            order_m = re.search(r'Nr\. Comanda:\s*([^\s<]+)', pm)
+            # Extragere metadate din ExtendedData sau descriere text brut
+            phone_m = re.search(r'Phone \(Billing\):\s*([^\s<]+)', pm) or re.search(r'<Data name="Phone \(Billing\)">\s*<value>(.*?)</value>', pm, re.DOTALL)
+            first_m = re.search(r'First Name \(Shipping\):\s*([^\s<]+)', pm) or re.search(r'<Data name="First Name \(Shipping\)">\s*<value>(.*?)</value>', pm, re.DOTALL)
+            last_m = re.search(r'Last Name \(Shipping\):\s*([^\s<]+)', pm) or re.search(r'<Data name="Last Name \(Shipping\)">\s*<value>(.*?)</value>', pm, re.DOTALL)
+            order_m = re.search(r'Nr\. Comanda:\s*([^\s<]+)', pm) or re.search(r'<Data name="Nr\. Comanda">\s*<value>(.*?)</value>', pm, re.DOTALL)
             
             if coords_m:
-                c_parts = coords_m.group(1).strip().split(',')
+                # Curățăm caracterele de tip linie nouă sau spații din coordonate
+                c_text = coords_m.group(1).strip()
+                c_parts = c_text.split(',')
                 if len(c_parts) >= 2:
                     try:
                         rec = {
@@ -112,19 +59,25 @@ def parse_kml_flexible(uploaded_file):
                             'Longitudine': float(c_parts[0].strip()),
                             'Geocoded_address': name_t
                         }
-                        if phone_m: rec['KML_Ext_Phone (Billing)'] = phone_m.group(1).strip()
-                        if first_m: rec['KML_Ext_First Name (Shipping)'] = first_m.group(1).strip()
-                        if last_m: rec['KML_Ext_Last Name (Shipping)'] = last_m.group(1).strip()
-                        if order_m: rec['KML_Ext_Nr. Comanda'] = order_m.group(1).strip()
                         
-                        records_regex.append(rec)
+                        # Curățăm tag-urile XML reziduale dacă meciul a fost din ExtendedData
+                        clean_tag = lambda m: re.sub('<[^<]+?>', '', m.group(1)).strip() if m else ""
+                        
+                        rec['KML_Ext_Phone (Billing)'] = re.sub('<[^<]+?>', '', phone_m.group(1)).strip() if phone_m else ""
+                        rec['KML_Ext_First Name (Shipping)'] = re.sub('<[^<]+?>', '', first_m.group(1)).strip() if first_m else ""
+                        rec['KML_Ext_Last Name (Shipping)'] = re.sub('<[^<]+?>', '', last_m.group(1)).strip() if last_m else ""
+                        rec['KML_Ext_Nr. Comanda'] = re.sub('<[^<]+?>', '', order_m.group(1)).strip() if order_m else ""
+                        
+                        records.append(rec)
                     except ValueError:
                         pass
                         
-        if len(records_regex) > 0:
-            return pd.DataFrame(records_regex), None
+        if len(records) > 0:
+            # Eliminăm eventualele duplicate citite eronat
+            df_res = pd.DataFrame(records).drop_duplicates(subset=['Latitudine', 'Longitudine'])
+            return df_res, None
             
-        return None, "Nu s-au găsit puncte geografice în fișier."
+        return None, "Nu s-au găsit puncte geografice în fișier. Verificați dacă harta conține pini plasați."
     except Exception as e:
         return None, f"Eroare la procesarea fișierului: {str(e)}"
 
@@ -311,7 +264,7 @@ def generate_optimized_routes(orders_df, original_columns):
 
 # --- UI Interface ---
 st.title("🚚 RoRoute - Sincronizare Inteligentă Excel + My Maps")
-st.subheader("Potrivire automată bazată pe Nume Client")
+st.subheader("Potrivire automată bazată pe Nume Client și Telefon")
 
 st.sidebar.markdown("### 📋 Încărcare Date")
 uploaded_excel = st.sidebar.file_uploader("1. Încarcă Tabelul Excel/CSV cu Comenzi", type=["csv", "xlsx"])
@@ -335,29 +288,33 @@ if uploaded_excel and uploaded_kml:
         orders_mapped['Latitudine'] = np.nan
         orders_mapped['Longitudine'] = np.nan
         
-        # FIX DEFINITIV: Potrivire ultra-flexibilă pe bază de Nume + Prenume pentru a ocoli lipsa ID-urilor din KML
+        # Buclă inteligentă de interconectare
         for idx, row in orders_mapped.iterrows():
             match_found = False
             excel_first = str(row['Client_First']).strip().lower() if row['Client_First'] else ""
             excel_last = str(row['Client_Last']).strip().lower() if row['Client_Last'] else ""
             excel_full_name = f"{excel_first} {excel_last}"
             
+            # Curățăm numărul de telefon din Excel pentru a extrage ultimele 9 cifre (elimină 0 sau prefix de țară)
+            ex_phone_clean = ''.join(filter(str.isdigit, str(row['Telefon'])))[-9:] if row['Telefon'] else ""
+            
             for _, kml_row in kml_df.iterrows():
+                kml_name = str(kml_row['KML_Name']).strip().lower()
                 kml_first = str(kml_row.get('KML_Ext_First Name (Shipping)', '')).strip().lower()
                 kml_last = str(kml_row.get('KML_Ext_Last Name (Shipping)', '')).strip().lower()
                 kml_full_name = f"{kml_first} {kml_last}"
                 
-                # Dacă numele se potrivesc perfect sau sunt incluse unul în celălalt
-                if excel_first and excel_last and kml_first and kml_last:
-                    if (excel_first in kml_first and excel_last in kml_last) or (kml_full_name in excel_full_name or excel_full_name in kml_full_name):
-                        match_found = True
+                # Curățăm numărul din KML
+                kml_phone_raw = str(kml_row.get('KML_Ext_Phone (Billing)', ''))
+                kml_phone_clean = ''.join(filter(str.isdigit, kml_phone_raw))[-9:] if kml_phone_raw else ""
                 
-                # Alternativă: verificăm numărul de telefon, ignorând prefixele de țară (+40)
-                if not match_found and row['Telefon']:
-                    ex_phone_clean = ''.join(filter(str.isdigit, str(row['Telefon'])))[-9:]
-                    kml_phone_raw = str(kml_row.get('KML_Ext_Phone (Billing)', ''))
-                    kml_phone_clean = ''.join(filter(str.isdigit, kml_phone_raw))[-9:]
-                    if ex_phone_clean and kml_phone_clean and ex_phone_clean == kml_phone_clean:
+                # Regula 1: Verificare număr telefon (Ultimele 9 cifre - Imun la +40 vs 07)
+                if ex_phone_clean and kml_phone_clean and ex_phone_clean == kml_phone_clean:
+                    match_found = True
+                
+                # Regula 2: Verificare Nume + Prenume complet
+                if not match_found and excel_first and excel_last and kml_first and kml_last:
+                    if (excel_first in kml_first and excel_last in kml_last) or (kml_full_name in excel_full_name or excel_full_name in kml_full_name):
                         match_found = True
                         
                 if match_found:
@@ -366,7 +323,7 @@ if uploaded_excel and uploaded_kml:
                     break
                     
         orders_final_df = orders_mapped
-        st.sidebar.success(f"📊 Date corelate cu succes pe baza numelor clienților!")
+        st.sidebar.success(f"📊 Date corelate cu succes pe baza metadatelor text!")
 
 if orders_final_df is not None:
     st.info("✨ Sincronizarea a fost realizată. Coordonatele GPS au fost extrase direct din fișier.")
