@@ -43,7 +43,7 @@ def extract_locality_fallback(address_text):
     return "Bucuresti"
 
 def geocode_address_bulletproof(address_raw):
-    if not address_raw or pd.isna(address_raw):
+    if not address_raw or pd.isna(address_raw) or str(address_raw).strip() == "":
         return 44.4325, 26.1001, "Adresă Lipsă", "Punct Default"
     addr_str = str(address_raw).strip()
     if addr_str in st.session_state.geocoding_cache:
@@ -51,7 +51,7 @@ def geocode_address_bulletproof(address_raw):
         
     clean_addr = clean_romanian_address(addr_str)
     query_full = clean_addr if "romania" in clean_addr.lower() else f"{clean_addr}, Romania"
-    geolocator = Nominatim(user_agent="roroute_dispecerat_v7")
+    geolocator = Nominatim(user_agent="roroute_dispecerat_v7_final")
     
     try:
         location = geolocator.geocode(query_full, timeout=5)
@@ -91,33 +91,31 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
     orders = orders_df.copy()
     
-    # Pregătim coloanele noi ca obiect text
+    # Adăugăm coloanele de sistem ca tip obiect
     for col in ['Curier_Sist', 'Interval_Sist', 'Secventa', 'Ora_estimata_sosire', 'Link_navigatie', 'Status_Geocode', 'Latitudine', 'Longitudine']:
         orders[col] = ""
         orders[col] = orders[col].astype(object)
 
-    # 1. Geocodare adrese din tabelul de comenzi
+    # 1. Geocodare adrese din tabelul de comenzi folosind coloana mapată intern 'Adresa_Sist'
     with st.spinner("Geocodare și localizare adrese clienți..."):
         for idx, row in orders.iterrows():
-            lat, lon, geo_addr, id_type = geocode_address_bulletproof(row['Adresa'])
+            lat, lon, geo_addr, id_type = geocode_address_bulletproof(row['Adresa_Sist'])
             orders.at[idx, 'Latitudine'] = lat
             orders.at[idx, 'Longitudine'] = lon
             orders.at[idx, 'Status_Geocode'] = id_type
 
-    # 2. Geocodare puncte de start pentru curierii selectați activi
+    # 2. Geocodare puncte de start pentru curieri
     c_coords = {}
     for idx, row in df_active_couriers.iterrows():
         lat_s, lon_s, _, _ = geocode_address_bulletproof(row['Punct_plecare'])
-        c_coords[row['Curier_ID']] = {
-            'start_lat': lat_s, 'start_lon': lon_s
-        }
+        c_coords[row['Curier_ID']] = {'start_lat': lat_s, 'start_lon': lon_s}
 
     courier_tracks = {c_row['Curier_ID']: [] for _, c_row in df_active_couriers.iterrows()}
     courier_counts = {c_row['Curier_ID']: 0 for _, c_row in df_active_couriers.iterrows()}
     unassigned_orders = orders.to_dict('records')
     unroutable = pd.DataFrame(columns=orders.columns)
     
-    # 3. Alocare geografică inteligentă pe curieri (Maxim 20 comenzi/om)
+    # 3. Alocare geografică (Maxim 20 comenzi/om)
     while len(unassigned_orders) > 0:
         best_score = float('inf')
         best_courier = None
@@ -190,21 +188,19 @@ def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
             current_time += timedelta(minutes=travel_time_min)
             arrival_time_str = current_time.strftime("%H:%M")
             
-            # Regulă de timp: Rotunjire în jos la ora fixă + Fereastră de 2h
             rounded_hour = current_time.hour
             applied_slot = f"{rounded_hour:02d}:00-{(rounded_hour + 2):02d}:00"
             
-            # Mapăm datele direct în structura originală cerută
+            # Populăm exact coloanele capătului tău de tabel original
             stop['Curier'] = c_row['Nume_curier']
             stop['Interval Livrare'] = applied_slot
             
-            # Câmpuri administrative tehnice secundare
             stop['Secventa'] = seq
             stop['Ora_estimata_sosire'] = arrival_time_str
             stop['Link_navigatie'] = f"http://maps.google.com/?q={stop['Latitudine']},{stop['Longitudine']}"
             
             final_route_records.append(stop)
-            current_time += timedelta(minutes=20) # 10 min stop + 10 min buffer
+            current_time += timedelta(minutes=20)
 
     df_final_output = pd.DataFrame(final_route_records) if final_route_records else pd.DataFrame()
     if not df_final_output.empty and not unroutable.empty:
@@ -212,17 +208,16 @@ def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
     elif df_final_output.empty:
         df_final_output = unroutable
 
-    # Forțăm respectarea exactă a capătului de tabel original primit de la tine
     review_needed = df_final_output[df_final_output['Status_Geocode'].isin(['Aproximat Localitate', 'Necesită Atenție'])]
     
-    # Returnăm tabelul ordonat exact după structura ta originală
-    return df_final_output[original_columns], review_needed, df_final_output
+    # Asigurăm exportul fix în formatul tău original
+    existing_columns = [c for c in original_columns if c in df_final_output.columns]
+    return df_final_output[existing_columns], review_needed, df_final_output
 
 # --- UI Interface ---
 st.title("🚚 RoRoute - Panificator Inteligent de Livrări")
 st.subheader("Sincronizare automată tabel comenzi și configurație curieri")
 
-# Încărcare fișiere din dispecerat
 st.sidebar.markdown("### 📋 Încărcare Documente")
 uploaded_orders = st.sidebar.file_uploader("1. Încarcă Tabel Comenzi (Excel/CSV)", type=["csv", "xlsx"])
 uploaded_couriers = st.sidebar.file_uploader("2. Încarcă Configurație Curieri (.csv)", type=["csv"])
@@ -233,70 +228,74 @@ original_cols = []
 
 if uploaded_orders:
     df_orders_raw = pd.read_csv(uploaded_orders) if uploaded_orders.name.endswith('.csv') else pd.read_excel(uploaded_orders)
-    # Curățăm coloanele de spații
+    # Curățăm denumirile coloanelor brute de spații
     df_orders_raw.columns = [str(c).strip() for c in df_orders_raw.columns]
     original_cols = list(df_orders_raw.columns)
+    
+    # FIX PENTRU KEYERROR: Mapare flexibilă pentru coloana Adresa
+    if 'Adresa' not in df_orders_raw.columns:
+        for alternative in ['Adresă', 'Address', 'Full Address', 'Adresa livrare']:
+            if alternative in df_orders_raw.columns:
+                df_orders_raw['Adresa_Sist'] = df_orders_raw[alternative]
+                break
+    else:
+        df_orders_raw['Adresa_Sist'] = df_orders_raw['Adresa']
 
 if uploaded_couriers:
-    # Citim curierii folosind separatorul punct și virgulă întâlnit în fișierul tău bun
     df_couriers_raw = pd.read_csv(uploaded_couriers, sep=";")
     df_couriers_raw.columns = [str(c).strip() for c in df_couriers_raw.columns]
-    # Eliminăm eventuale coloane goale reziduale de la citire
     df_couriers_raw = df_couriers_raw.dropna(subset=['Curier_ID', 'Nume_curier'])
 
-# Activare sistem de bife interactive pentru curieri
 active_couriers_df = pd.DataFrame()
 if df_couriers_raw is not None:
     st.sidebar.markdown("### 🛵 Selectează Curierii Activi Azi:")
     selected_couriers = []
     for idx, row in df_couriers_raw.iterrows():
-        # Creăm o bifă pentru fiecare curier găsit în fișierul tău csv
         is_active = st.sidebar.checkbox(f"🛵 {row['Nume_curier']} ({row['Zona_preferata']})", value=True, key=f"c_{row['Curier_ID']}")
         if is_active:
             selected_couriers.append(row)
     if selected_couriers:
         active_couriers_df = pd.DataFrame(selected_couriers)
 
-# Ecran principal de operare
 if df_orders_raw is not None and not active_couriers_df.empty:
-    st.success(f"📊 Date corelate! {len(df_orders_raw)} comenzi detectate și {len(active_couriers_df)} curieri selectați ca activi.")
+    st.success(f"📊 Date pregătite! {len(df_orders_raw)} comenzi detectate și {len(active_couriers_df)} curieri activi.")
     
     if st.button("🚀 Generează și Optimizează Traseele pe Hartă", type="primary"):
-        routes_final, review_df, full_tech_df = generate_optimized_routes(df_orders_raw, active_couriers_df, original_cols)
-        
-        if routes_final is not None and not routes_final.empty:
-            st.success("✅ Optimizare finalizată! Traseele curierilor au fost calculate.")
+        # Verificăm din nou existența coloanei mapate
+        if 'Adresa_Sist' not in df_orders_raw.columns:
+            st.error("❌ Nu am putut identifica coloana cu adresele de livrare în fișierul tău. Asigură-te că se numește 'Adresa'.")
+        else:
+            routes_final, review_df, full_tech_df = generate_optimized_routes(df_orders_raw, active_couriers_df, original_cols)
             
-            # --- AFIȘARE TRASĂ PE HARTĂ INTERACTIVĂ (REPARAT) ---
-            st.markdown("### 🗺️ Vizualizare Trasee pe Hartă Interactivă")
-            # Filtrăm doar rândurile care au primit curier și au coordonate valide pentru st.map
-            map_clean_df = full_tech_df[full_tech_df['Curier'].notna() & (full_tech_df['Curier'] != "")]
-            if not map_clean_df.empty:
-                map_render = map_clean_df[['Latitudine', 'Longitudine']].dropna().rename(columns={'Latitudine': 'latitude', 'Longitudine': 'longitude'})
-                st.map(map_render)
-            
-            # KPI Cards
-            kpi_cols = st.columns(3)
-            kpi_cols[0].metric("Total Livrări Alocate", len(map_clean_df))
-            kpi_cols[1].metric("Curieri pe Traseu", map_clean_df['Curier'].nunique())
-            kpi_cols[2].metric("Adrese de Verificat", len(review_df))
-            
-            if len(review_df) > 0:
-                st.warning("⚠️ Adrese identificate aproximativ (vă rugăm să atenționați curierii să verifice eticheta coletului):")
-                st.dataframe(review_df[['Nr. Comanda', 'First Name (Shipping)', 'Last Name (Shipping)', 'Adresa', 'Status_Geocode']], use_container_width=True)
+            if routes_final is not None and not routes_final.empty:
+                st.success("✅ Optimizare finalizată!")
                 
-            st.markdown("### 🗺️ Ordinea Livrărilor pe Traseu (Căpăt de tabel original respectat)")
-            # Sortăm vizualizarea pe curier și ordinea secvenței calculate
-            st.dataframe(routes_final, use_container_width=True)
-            
-            # Export Buffer
-            csv_buffer = io.StringIO()
-            routes_final.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📥 Descarcă Fișierul de Trasee Final (Format identic cu cel atașat)",
-                data=csv_buffer.getvalue(),
-                file_name=f"Trasee_Livrare_Cirese_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+                # --- AFIȘARE HARTĂ INTERACTIVĂ ---
+                st.markdown("### 🗺️ Vizualizare Trasee pe Hartă Interactivă")
+                map_clean_df = full_tech_df[full_tech_df['Curier'].notna() & (full_tech_df['Curier'] != "")]
+                if not map_clean_df.empty:
+                    map_render = map_clean_df[['Latitudine', 'Longitudine']].dropna().rename(columns={'Latitudine': 'latitude', 'Longitudine': 'longitude'})
+                    st.map(map_render)
+                
+                kpi_cols = st.columns(3)
+                kpi_cols[0].metric("Total Livrări Alocate", len(map_clean_df))
+                kpi_cols[1].metric("Curieri pe Traseu", map_clean_df['Curier'].nunique())
+                kpi_cols[2].metric("Adrese de Verificat", len(review_df))
+                
+                if len(review_df) > 0:
+                    st.warning("⚠️ Adrese identificate aproximativ:")
+                    st.dataframe(review_df[['Nr. Comanda', 'First Name (Shipping)', 'Last Name (Shipping)', 'Adresa_Sist', 'Status_Geocode']], use_container_width=True)
+                    
+                st.markdown("### 🗺️ Ordinea Livrărilor (Format identic cu fișierul original)")
+                st.dataframe(routes_final, use_container_width=True)
+                
+                csv_buffer = io.StringIO()
+                routes_final.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📥 Descarcă Fișierul de Trasee Final",
+                    data=csv_buffer.getvalue(),
+                    file_name=f"Trasee_Livrare_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
 else:
     st.info("💡 Pentru a începe, încarcă tabelul cu comenzi și tabelul de curieri în bara laterală stângă, apoi bifează cine livrează astăzi.")
