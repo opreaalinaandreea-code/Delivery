@@ -88,12 +88,11 @@ def get_sample_data():
 def standardize_orders_df(df):
     """Maps custom user columns to required system terms flexibly."""
     df = df.copy()
-    # Strip whitespace from column names
     df.columns = [str(c).strip() for c in df.columns]
     
     mapping = {
         'ID_Livrare': ['ID_Livrare', 'Nr. Comanda', 'Id', 'ID', 'Cod'],
-        'Client': ['Client', 'Nume', 'First Name (Shipping)', 'Name', 'Destinatar'],
+        'Client': ['Client', 'Nume', 'First Name (Shipping)', 'Last Name (Shipping)', 'Name', 'Destinatar'],
         'Telefon': ['Telefon', 'Phone (Billing)', 'Phone', 'Tel'],
         'Adresa_originala': ['Adresa_originala', 'Adresa', 'Address', 'Adresă'],
         'Localitate_presupusa': ['Localitate_presupusa', 'Localitate', 'Oras', 'Oraș', 'City'],
@@ -107,9 +106,8 @@ def standardize_orders_df(df):
                     df[system_col] = df[option]
                     break
             if system_col not in df.columns:
-                df[system_col] = "" # fallback default empty
+                df[system_col] = ""
                 
-    # Ensure mandatory operational column requirements exist
     if 'Durata_stop_min' not in df.columns: df['Durata_stop_min'] = 10
     if 'Timp_buffer_min' not in df.columns: df['Timp_buffer_min'] = 10
     return df
@@ -135,7 +133,6 @@ def standardize_couriers_df(df):
                     df[system_col] = df[option]
                     break
     
-    # Fill in robust defaults if completely missing or empty
     if 'Curier_ID' not in df.columns: df['Curier_ID'] = [f"C{i}" for i in range(1, len(df)+1)]
     if 'Nume_curier' not in df.columns: df['Nume_curier'] = df['Curier_ID']
     if 'Activ' not in df.columns: df['Activ'] = True
@@ -143,13 +140,11 @@ def standardize_couriers_df(df):
     if 'Punct_finalizare' not in df.columns: df['Punct_finalizare'] = "Bucuresti, Romania"
     if 'Capacitate_max_livrari' not in df.columns: df['Capacitate_max_livrari'] = 20
     
-    # Clean up truth evaluations for string columns (e.g. 'da', 'true')
     df['Activ'] = df['Activ'].apply(lambda x: str(x).strip().lower() in ['true', '1', 'da', 'yes', 'active'])
     return df
 
 # --- Core Routing Algorithm ---
 def generate_optimized_routes(df_orders, df_couriers):
-    # Standarize incoming data schemas safely
     orders = standardize_orders_df(df_orders)
     couriers = standardize_couriers_df(df_couriers)
     
@@ -160,7 +155,6 @@ def generate_optimized_routes(df_orders, df_couriers):
     if len(active_couriers) > 4:
         active_couriers = active_couriers.head(4)
 
-    # Resolve Courier Start/End Hub Coordinates
     c_coords = {}
     for idx, row in active_couriers.iterrows():
         lat_s, lon_s, _ = geocode_address(row['Punct_plecare'])
@@ -170,24 +164,28 @@ def generate_optimized_routes(df_orders, df_couriers):
             'end_lat': lat_f or 44.4325, 'end_lon': lon_f or 26.1001
         }
 
-    # Add computational structural columns
-    for col in ['Latitudine', 'Longitudine', 'Geocoded_address', 'Status', 'Curier_alocat']:
+    # FIX: Initialize columns explicitly forcing Object/String types to avoid strict Pandas 3.14 dtype validation crashes
+    for col in ['Latitudine', 'Longitudine']:
         if col not in orders.columns:
             orders[col] = np.nan
+            
+    for col in ['Geocoded_address', 'Status', 'Curier_alocat']:
+        if col not in orders.columns:
+            orders[col] = ""
+            orders[col] = orders[col].astype(object)
 
-    # Process Geocoding Loop
     with st.spinner("Geocodare adrese în desfășurare..."):
         for idx, row in orders.iterrows():
             if pd.isna(row['Latitudine']) or pd.isna(row['Longitudine']) or row['Latitudine'] == "":
                 lat, lon, geo_addr = geocode_address(row['Adresa_originala'], row.get('Localitate_presupusa', ''), row.get('Judet', ''))
                 orders.at[idx, 'Latitudine'] = lat
                 orders.at[idx, 'Longitudine'] = lon
-                orders.at[idx, 'Geocoded_address'] = geo_addr
+                orders.at[idx, 'Geocoded_address'] = str(geo_addr)
                 orders.at[idx, 'Status'] = 'Geocodat Automat' if lat else 'Necesită Revizie Manuală'
             else:
                 orders.at[idx, 'Status'] = 'Coordonate Existente'
-                if pd.isna(row['Geocoded_address']):
-                    orders.at[idx, 'Geocoded_address'] = row['Adresa_originala']
+                if pd.isna(row['Geocoded_address']) or row['Geocoded_address'] == "":
+                    orders.at[idx, 'Geocoded_address'] = str(row['Adresa_originala'])
 
     unroutable = orders[orders['Latitudine'].isna() | orders['Longitudine'].isna()].copy()
     routable = orders.dropna(subset=['Latitudine', 'Longitudine']).copy()
@@ -297,7 +295,7 @@ def generate_optimized_routes(df_orders, df_couriers):
             stop['Ora_estimata_sosire'] = arrival_time_str
             stop['Slot_fix_livrare'] = applied_slot
             stop['Regula_slot_aplicata'] = rule_desc
-            stop['Link_navigatie'] = f"https://www.google.com/maps/search/?api=1&query={stop['Latitudine']},{stop['Longitudine']}"
+            stop['Link_navigatie'] = f"http://maps.google.com/?q={stop['Latitudine']},{stop['Longitudine']}"
             stop['Status'] = 'Optimizat'
             
             final_route_records.append(stop)
@@ -337,7 +335,6 @@ else:
         else:
             couriers_df = pd.read_excel(uploaded_couriers)
     elif uploaded_orders is not None:
-        # Auto-generate basic courier config if user doesn't upload a second file
         st.sidebar.warning("⚠️ Fișier curieri lipsă. Generăm automat 2 curieri impliciti.")
         couriers_df = pd.DataFrame({
             'Curier_ID': ['C01', 'C02'],
