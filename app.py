@@ -4,32 +4,44 @@ import numpy as np
 import math
 import xml.etree.ElementTree as ET
 import re
+import zipfile
 from datetime import datetime, timedelta
 import io
 
 # --- Page Configuration ---
 st.set_page_config(page_title="RoRoute - Planificator My Maps Excel", layout="wide")
 
-# --- Funcție de extragere inteligentă pentru structura specifică Google My Maps ---
-def parse_kml_flexible(kml_file):
+# --- Funcție de extragere BULLETPROOF pentru KML / KMZ ---
+def parse_kml_flexible(uploaded_file):
     """
-    Scanează flexibil tot fișierul KML și extrage coordonatele geo alături de metadate,
-    indiferent dacă ID-ul este în name, description sau ExtendedData.
+    Scanează flexibil un fișier KML sau KMZ (arhivă zip) exportat din Google My Maps.
+    Dezarhivează automat dacă este KMZ și citește coordonatele + metadatele.
     """
     try:
-        kml_content = kml_file.read()
-        utf8_content = kml_content.decode('utf-8', errors='ignore')
+        file_bytes = uploaded_file.read()
         
-        # Curățare namespace-uri pentru parsare XML nativă ușoară
+        # Pasul 1: Verificăm dacă este de fapt un fișier KMZ (arhivă zip)
+        if zipfile.is_zipfile(io.BytesIO(file_bytes)):
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                # Căutăm fișierul doc.kml din interiorul arhivei KMZ
+                kml_names = [name for name in z.namelist() if name.endswith('.kml')]
+                if not kml_names:
+                    return None, "Arhiva KMZ nu conține niciun fișier KML valid."
+                utf8_content = z.read(kml_names[0]).decode('utf-8', errors='ignore')
+        else:
+            # Este un KML text normal
+            utf8_content = file_bytes.decode('utf-8', errors='ignore')
+            
+        # Curățare namespace-uri XML pentru parsare mai ușoară
         clean_content = re.sub(r'\sxmlns="[^"]+"', '', utf8_content, count=1)
         try:
             root = ET.fromstring(clean_content.encode('utf-8'))
         except Exception:
-            root = ET.fromstring(kml_content)
+            root = ET.fromstring(utf8_content.encode('utf-8', errors='ignore'))
             
         records = []
         
-        # Iterăm prin toate elementele tip Placemark
+        # Iterăm prin toate elementele tip Placemark din structură
         for elem in root.iter():
             tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
             
@@ -46,7 +58,6 @@ def parse_kml_flexible(kml_file):
                     elif child_tag == 'description' and child.text:
                         desc_text = child.text.strip()
                     elif child_tag == 'ExtendedData':
-                        # Extragem metadatele din structura complexă Google My Maps
                         for data_elem in child.iter():
                             d_tag = data_elem.tag.split('}')[-1] if '}' in data_elem.tag else data_elem.tag
                             if d_tag == 'Data':
@@ -67,15 +78,13 @@ def parse_kml_flexible(kml_file):
                             lon = float(parts[0].strip())
                             lat = float(parts[1].strip())
                             
-                            # Construim un dicționar de bază pentru acest punct
                             rec = {
                                 'KML_Name': name_text,
                                 'Latitudine': lat,
                                 'Longitudine': lon,
                                 'Geocoded_address': name_text
                             }
-                            
-                            # Adăugăm datele extinse găsite (Nr. Comanda, Telefoane, Nume prenume)
+                            # Atașăm metadatele extinse salvate de Google
                             for k, v in extended_data.items():
                                 rec[f"KML_Ext_{k}"] = v
                                 
@@ -86,16 +95,14 @@ def parse_kml_flexible(kml_file):
         if len(records) > 0:
             return pd.DataFrame(records), None
             
-        # --- Fallback secundar prin Regex (Dacă structura XML dă erori) ---
+        # --- Fallback prin Căutare Text (Regex) directă în conținut ---
         records_regex = []
         placemarks_raw = re.findall(r'<Placemark>.*?</Placemark>', utf8_content, re.DOTALL)
         for pm in placemarks_raw:
             name_m = re.search(r'<name>(.*?)</name>', pm)
             coords_m = re.search(r'<coordinates>(.*?)</coordinates>', pm)
-            
             name_t = name_m.group(1).strip() if name_m else "Fără Nume"
             
-            # Încercăm să prindem câmpuri cheie direct prin regex din descriere
             phone_m = re.search(r'Phone \(Billing\):\s*([^\s<]+)', pm)
             first_m = re.search(r'First Name \(Shipping\):\s*([^\s<]+)', pm)
             last_m = re.search(r'Last Name \(Shipping\):\s*([^\s<]+)', pm)
@@ -123,9 +130,9 @@ def parse_kml_flexible(kml_file):
         if len(records_regex) > 0:
             return pd.DataFrame(records_regex), None
             
-        return None, "Nu s-au găsit puncte geografice. Asigură-te că fișierul este KML valid exportat din My Maps."
+        return None, "Nu s-au găsit puncte geografice. Verificați fișierul exportat din My Maps."
     except Exception as e:
-        return None, f"Eroare la procesarea fișierului KML: {str(e)}"
+        return None, f"Eroare la procesarea fișierului: {str(e)}"
 
 # --- Distance Calculation ---
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -191,7 +198,7 @@ def generate_optimized_routes(orders_df, original_columns):
     unroutable = orders[orders['Latitudine'].isna() | orders['Longitudine'].isna()].copy()
     
     if len(routable_items) == 0:
-        return orders, orders.copy() # Returnare sigură
+        return orders, orders.copy()
 
     while len(routable_items) > 0:
         best_score = float('inf')
@@ -314,7 +321,7 @@ st.subheader("Potrivire avansată pe baza datelor extinse geografice")
 
 st.sidebar.markdown("### 📋 Încărcare Date")
 uploaded_excel = st.sidebar.file_uploader("1. Încarcă Tabelul Excel/CSV cu Comenzi", type=["csv", "xlsx"])
-uploaded_kml = st.sidebar.file_uploader("2. Încarcă Harta KML din Google My Maps", type=["kml"])
+uploaded_kml = st.sidebar.file_uploader("2. Încarcă Harta (KML sau KMZ) din Google My Maps", type=["kml", "kmz"])
 
 orders_final_df = None
 original_columns_list = []
@@ -331,11 +338,10 @@ if uploaded_excel and uploaded_kml:
     if err:
         st.error(err)
     else:
-        # STRATEGIA DE SINCRO INTELIGENTĂ:
-        # Încercăm mai multe metode de potrivire pentru a asigura succesul
         orders_mapped['Latitudine'] = np.nan
         orders_mapped['Longitudine'] = np.nan
         
+        # Buclă inteligentă de potrivire
         for idx, row in orders_mapped.iterrows():
             match_found = False
             excel_phone = str(row['Telefon']).strip().replace('+', '') if row['Telefon'] else ""
@@ -344,23 +350,18 @@ if uploaded_excel and uploaded_kml:
             excel_id = str(row['ID_Livrare']).strip().lower() if row['ID_Livrare'] else ""
             
             for _, kml_row in kml_df.iterrows():
-                # Extragere date KML pentru comparare
                 kml_name = str(kml_row['KML_Name']).strip().lower()
                 kml_phone = str(kml_row.get('KML_Ext_Phone (Billing)', '')).strip().replace('+', '')
                 kml_first = str(kml_row.get('KML_Ext_First Name (Shipping)', '')).strip().lower()
                 kml_last = str(kml_row.get('KML_Ext_Last Name (Shipping)', '')).strip().lower()
                 kml_order = str(kml_row.get('KML_Ext_Nr. Comanda', '')).strip().lower()
                 
-                # Regula 1: Potrivire după număr de telefon (Cea mai sigură metodă unică)
                 if excel_phone and kml_phone and (excel_phone in kml_phone or kml_phone in excel_phone):
                     match_found = True
-                # Regula 2: Potrivire după ID Comandă stocat în KML
                 elif excel_id and kml_order and excel_id == kml_order:
                     match_found = True
-                # Regula 3: Potrivire după Nume + Prenume client
                 elif excel_first and excel_last and kml_first and kml_last and (excel_first in kml_first or excel_last in kml_last):
                     match_found = True
-                # Regula 4: Adresa din Excel se potrivește cu Numele punctului din KML
                 elif len(kml_name) > 5 and kml_name in str(row['Adresa_originala']).lower():
                     match_found = True
                     
@@ -370,10 +371,10 @@ if uploaded_excel and uploaded_kml:
                     break
                     
         orders_final_df = orders_mapped
-        st.sidebar.success(f"📊 S-au mapat cu succes adresele verificate din hărți!")
+        st.sidebar.success(f"📊 Date corelate cu succes!")
 
 if orders_final_df is not None:
-    st.info("✨ Datele au fost interconectate. Algoritmul a citit corect coordonatele GPS din My Maps.")
+    st.info("✨ Sincronizarea a fost realizată. Coordonatele GPS au fost extrase direct din fișier.")
     
     if st.button("🚀 Generează Traseele Optimizate", type="primary"):
         routes_res, unrouted_df = generate_optimized_routes(orders_final_df, original_columns_list)
@@ -387,7 +388,7 @@ if orders_final_df is not None:
             kpi_cols = st.columns(3)
             kpi_cols[0].metric("Total Comenzi Alocate", total_allocated)
             kpi_cols[1].metric("Curieri Pe Traseu", routes_only['Curier'].nunique() if total_allocated > 0 else 0)
-            kpi_cols[2].metric("Comenzi Neidentificate în KML", len(routes_res) - total_allocated)
+            kpi_cols[2].metric("Comenzi Neidentificate în Hărți", len(routes_res) - total_allocated)
             
             if total_allocated > 0:
                 st.markdown("### 🗺️ Vizualizare Trasee Curieri")
@@ -408,7 +409,7 @@ if orders_final_df is not None:
             
             unmatched_addresses = routes_res[routes_res['Status'] != 'Optimizat Exact']
             if not unmatched_addresses.empty:
-                st.warning("⚠️ Următoarele comenzi nu au putut fi legate de punctele din My Maps (Verificați dacă datele clientului coincid în ambele fișiere):")
+                st.warning("⚠️ Următoarele comenzi nu au fost găsite în fișierul de hărți:")
                 st.dataframe(unmatched_addresses[['ID_Livrare', 'Telefon', 'Adresa_originala']], use_container_width=True)
 
             st.markdown("### 🗺️ Tabel Trasee Finale (Conține toate coloanele originale)")
@@ -423,4 +424,4 @@ if orders_final_df is not None:
                 mime="text/csv"
             )
 else:
-    st.info("💡 Încărcați simultan cele două fișiere în bara laterală pentru a porni maparea chirurgicală.")
+    st.info("💡 Încărcați simultan cele două fișiere în bara laterală pentru a porni maparea.")
