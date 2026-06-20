@@ -107,7 +107,6 @@ def standardize_orders_df(df):
     return df, original_cols
 
 def generate_optimized_routes(orders_df, original_columns):
-    # Configurație automată curieri
     couriers_data = {
         'Curier_ID': ['C01', 'C02', 'C03'],
         'Nume_curier': ['Curier Principal 1', 'Curier Principal 2', 'Curier Principal 3'],
@@ -146,4 +145,13 @@ def generate_optimized_routes(orders_df, original_columns):
         
         for idx, ord_item in enumerate(unassigned_orders):
             for _, c_row in active_couriers.iterrows():
-                c
+                c_id = c_row['Curier_ID']
+                if courier_counts[c_id] >= int(c_row['Capacitate_max_livrari']):
+                    continue
+                c_loc = c_coords[c_id]
+                dist_from_start = haversine_distance(ord_item['Latitudine'], ord_item['Longitudine'], c_loc['start_lat'], c_loc['start_lon'])
+                dist_to_finish = haversine_distance(ord_item['Latitudine'], ord_item['Longitudine'], c_loc['end_lat'], c_loc['end_lon'])
+                dist_to_last_stop = haversine_distance(ord_item['Latitudine'], ord_item['Longitudine'], courier_tracks[c_id][-1]['Latitudine'], courier_tracks[c_id][-1]['Longitudine']) if len(courier_tracks[c_id]) > 0 else dist_from_start
+                
+                score = (dist_from_start * 0.3) + (dist_to_finish * 0.2) + (dist_to_last_stop * 0.5) + (courier_counts[c_id] * 2.5)
+                if score < best
