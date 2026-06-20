@@ -20,26 +20,30 @@ def geocode_address(address, localitate="", judet=""):
     if not address or pd.isna(address):
         return None, None, "Adresă Lipsă"
         
-    full_query = f"{address}"
-    if localitate and not pd.isna(localitate): full_query += f", {localitate}"
-    if judet and not pd.isna(judet): full_query += f", {judet}"
-    full_query += ", Romania"
+    address_clean = str(address).strip()
     
+    # Dacă adresa conține deja cuvântul "romania", o folosim ca atare, altfel adăugăm țara
+    if "romania" not in address_clean.lower():
+        full_query = f"{address_clean}, Romania"
+    else:
+        full_query = address_clean
+        
     if full_query in st.session_state.geocoding_cache:
         return st.session_state.geocoding_cache[full_query]
         
-    geolocator = Nominatim(user_agent="roroute_planner_v1_operational_prod")
+    geolocator = Nominatim(user_agent="roroute_planner_v1_operational_prod_v2")
     try:
-        location = geolocator.geocode(full_query, timeout=4)
+        location = geolocator.geocode(full_query, timeout=5)
         if location:
             res = (location.latitude, location.longitude, location.address)
             st.session_state.geocoding_cache[full_query] = res
             return res
         
-        # Fallback to locality if specific address fails
-        if localitate and not pd.isna(localitate):
-            fallback = f"{localitate}, Romania"
-            location = geolocator.geocode(fallback, timeout=4)
+        # Fallback elementar: dacă adresa completă eșuează, încercăm doar cu primul segment (de obicei orașul)
+        parts = address_clean.split(',')
+        if len(parts) > 0:
+            fallback_query = f"{parts[0].strip()}, Romania"
+            location = geolocator.geocode(fallback_query, timeout=4)
             if location:
                 res = (location.latitude, location.longitude, f"FALLBACK LOC: {location.address}")
                 st.session_state.geocoding_cache[full_query] = res
@@ -66,11 +70,7 @@ def get_sample_data():
         'ID_Livrare': [f"ORD-{i:03d}" for i in range(1, 6)],
         'Client': ['Popescu Ion', 'Ionescu Maria', 'Vasile Dan', 'Elena Grigore', 'Oana Gheltu'],
         'Telefon': ['0722111222', '0733222333', '0744333444', '0786440547', '0720015842'],
-        'Adresa_originala': ['Bulevardul Unirii 10', 'Strada Lipscani 22', 'Soseaua Oltenitei 40', 'Calea Mosilor 112', 'Strada Lanariei 126'],
-        'Localitate_presupusa': ['Bucuresti', 'Bucuresti', 'Bucuresti', 'Bucuresti', 'Bucuresti'],
-        'Judet': ['Bucuresti', 'Bucuresti', 'Bucuresti', 'Bucuresti', 'Bucuresti'],
-        'Latitudine': [44.4261, 44.4325, 44.4011, 44.4389, 44.4172],
-        'Longitudine': [26.1024, 26.1001, 26.1189, 26.1122, 26.1031],
+        'Adresa_originala': ['Bulevardul Unirii 10, Bucuresti', 'Strada Lipscani 22, Bucuresti', 'Soseaua Oltenitei 40, Bucuresti', 'Calea Mosilor 112, Bucuresti', 'Strada Lanariei 126, Bucuresti'],
         'Durata_stop_min': [10] * 5,
         'Timp_buffer_min': [10] * 5
     }
@@ -93,10 +93,8 @@ def standardize_orders_df(df):
     mapping = {
         'ID_Livrare': ['ID_Livrare', 'Nr. Comanda', 'Id', 'ID', 'Cod'],
         'Client': ['Client', 'Nume', 'First Name (Shipping)', 'Last Name (Shipping)', 'Name', 'Destinatar'],
-        'Telefon': ['Telefon', 'Phone (Billing)', 'Phone', 'Tel'],
-        'Adresa_originala': ['Adresa_originala', 'Adresa', 'Address', 'Adresă'],
-        'Localitate_presupusa': ['Localitate_presupusa', 'Localitate', 'Oras', 'Oraș', 'City'],
-        'Judet': ['Judet', 'Județ', 'County']
+        'Telefon': ['Telefon', 'Phone (Billing)', 'Phone', 'Tel', 'Phone_Billing'],
+        'Adresa_originala': ['Adresa_originala', 'Adresa', 'Address', 'Adresă', 'Full Address']
     }
     
     for system_col, user_options in mapping.items():
@@ -113,7 +111,6 @@ def standardize_orders_df(df):
     return df
 
 def standardize_couriers_df(df):
-    """Maps courier files securely or creates a dummy if columns/files are partial."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     
@@ -150,7 +147,7 @@ def generate_optimized_routes(df_orders, df_couriers):
     
     active_couriers = couriers[couriers['Activ'] == True].copy()
     if len(active_couriers) == 0:
-        return None, "Nu există curieri activi în fișier. Vă rugăm bifați/setați cel puțin un curier ca Activ."
+        return None, "Nu există curieri activi în fișier."
         
     if len(active_couriers) > 4:
         active_couriers = active_couriers.head(4)
@@ -176,7 +173,7 @@ def generate_optimized_routes(df_orders, df_couriers):
     with st.spinner("Geocodare adrese în desfășurare..."):
         for idx, row in orders.iterrows():
             if pd.isna(row['Latitudine']) or pd.isna(row['Longitudine']) or row['Latitudine'] == "":
-                lat, lon, geo_addr = geocode_address(row['Adresa_originala'], row.get('Localitate_presupusa', ''), row.get('Judet', ''))
+                lat, lon, geo_addr = geocode_address(row['Adresa_originala'])
                 orders.at[idx, 'Latitudine'] = lat
                 orders.at[idx, 'Longitudine'] = lon
                 orders.at[idx, 'Geocoded_address'] = str(geo_addr)
@@ -294,7 +291,7 @@ def generate_optimized_routes(df_orders, df_couriers):
             stop['Ora_estimata_sosire'] = arrival_time_str
             stop['Slot_fix_livrare'] = applied_slot
             stop['Regula_slot_aplicata'] = rule_desc
-            stop['Link_navigatie'] = f"http://maps.google.com/?q={stop['Latitudine']},{stop['Longitudine']}"
+            stop['Link_navigatie'] = f"https://www.google.com/maps/search/?api=1&query={stop['Latitudine']},{stop['Longitudine']}"
             stop['Status'] = 'Optimizat'
             
             final_route_records.append(stop)
@@ -334,11 +331,11 @@ else:
         else:
             couriers_df = pd.read_excel(uploaded_couriers)
     elif uploaded_orders is not None:
-        st.sidebar.warning("⚠️ Fișier curieri lipsă. Generăm automat 2 curieri impliciti.")
+        st.sidebar.warning("⚠️ Fișier curieri lipsă. Generăm automat 3 curieri impliciți pentru distribuție.")
         couriers_df = pd.DataFrame({
-            'Curier_ID': ['C01', 'C02'],
-            'Nume_curier': ['Curier Principal 1', 'Curier Principal 2'],
-            'Activ': [True, True]
+            'Curier_ID': ['C01', 'C02', 'C03'],
+            'Nume_curier': ['Curier Traseu 1', 'Curier Traseu 2', 'Curier Traseu 3'],
+            'Activ': [True, True, True]
         })
 
 if orders_df is not None and couriers_df is not None:
@@ -351,7 +348,6 @@ if orders_df is not None and couriers_df is not None:
     if st.button("🚀 Generează și Optimizează Traseele", type="primary"):
         routes_res, unrouted_res = generate_optimized_routes(orders_df, couriers_df)
         
-        # FIX: Check if the returned result is a valid filled DataFrame instead of checking dynamic true values directly
         if routes_res is not None and isinstance(routes_res, pd.DataFrame) and not routes_res.empty:
             st.success("✅ Optimizare Finalizată cu Succes!")
             
@@ -363,7 +359,7 @@ if orders_df is not None and couriers_df is not None:
             kpi_cols[0].metric("Total Livrări Alocate", total_allocated)
             kpi_cols[1].metric("Curieri Activi pe Traseu", unique_couriers)
             kpi_cols[2].metric("Medie Livrări / Curier", avg_stops)
-            kpi_cols[3].metric("Comenzi Eșuate", len(unrouted_res) if unrouted_res is not None else 0)
+            kpi_cols[3].metric("Comenzi Eșuate (Necesită Revizie)", len(unrouted_res) if unrouted_res is not None else 0)
             
             st.markdown("#### ⚖️ Rezumat Trasee Curieri")
             balance_summary = []
@@ -379,8 +375,7 @@ if orders_df is not None and couriers_df is not None:
             
             st.markdown("### 🗺️ Ordinea Traseelor Detaliată")
             display_cols = ['Curier', 'Secventa', 'ID_Livrare', 'Client', 'Telefon', 
-                            'Adresa_originala', 'Localitate_presupusa', 'Judet', 
-                            'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie']
+                            'Adresa_originala', 'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie']
             valid_display_cols = [c for c in display_cols if c in routes_res.columns]
             st.dataframe(routes_res[valid_display_cols].sort_values(by=['Curier', 'Secventa']), use_container_width=True)
             
@@ -392,8 +387,11 @@ if orders_df is not None and couriers_df is not None:
                 file_name=f"Rute_Planificate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
+            
+            if unrouted_res is not None and not unrouted_res.empty:
+                st.warning("⚠️ Adrese care nu au putut fi localizate automat pe hartă:")
+                st.dataframe(unrouted_res[['ID_Livrare', 'Client', 'Adresa_originala', 'Status']], use_container_width=True)
         else:
-            # Safe text error handler representation
-            st.error(unrouted_res if isinstance(unrouted_res, str) else "Eroare necunoscută la generare.")
+            st.error(unrouted_res if isinstance(unrouted_res, str) else "Eroare la procesarea algoritmului.")
 else:
     st.info("💡 Vă rugăm să selectați un mod din stânga pentru a începe.")
