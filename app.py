@@ -7,47 +7,99 @@ from datetime import datetime, timedelta
 import io
 
 # --- Page Configuration ---
-st.set_page_config(page_title="RoRoute - Planificator My Maps", layout="wide")
+st.set_page_config(page_title="RoRoute - Planificator My Maps Excel", layout="wide")
 
-# --- Funcție de extragere a datelor exacte din fișierul KML (Google My Maps) ---
-def parse_kml_to_dataframe(kml_file):
-    """Extrage numele, adresa și coordonatele exacte din fișierul exportat din My Maps."""
+# --- Funcție de extragere BULLETPROOF pentru KML (Google My Maps) ---
+def parse_kml_flexible(kml_file):
+    """
+    Scanează flexibil tot fișierul KML fără a depinde de namespace strict
+    sau structuri rigide de foldere.
+    """
     try:
         kml_content = kml_file.read()
-        # Definim namespace-ul standard pentru KML
-        namespaces = {'kml': 'http://www.opengis.net/kml/2.2'}
-        root = ET.fromstring(kml_content)
+        # Eliminăm namespace-urile din tag-uri pentru a putea căuta curat prin text brut
+        utf8_content = kml_content.decode('utf-8', errors='ignore')
+        clean_content = re.sub(r'\sxmlns="[^"]+"', '', utf8_content, count=1)
         
+        # Dacă eliminarea regex nu a fost ideală, încărcăm conținutul brut direct
+        try:
+            root = ET.fromstring(clean_content.encode('utf-8'))
+        except Exception:
+            root = ET.fromstring(kml_content)
+            
         records = []
-        # Căutăm toate punctele (Placemark) din fișier
-        for placemark in root.findall('.//kml:Placemark', namespaces):
-            name = placemark.find('kml:name', namespaces)
-            name_text = name.text if name is not None else "Fără Nume"
+        
+        # Căutăm absolut toate elementele Placemark de la orice nivel (căutare globală //)
+        # Folosim tehnica de a ignora namespace-ul verificând doar terminarea tag-ului
+        for elem in root.iter():
+            tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
             
-            description = placemark.find('kml:description', namespaces)
-            desc_text = description.text if description is not None else ""
-            
-            coordinates = placemark.find('.//kml:coordinates', namespaces)
-            if coordinates is not None and coordinates.text:
-                coords_str = coordinates.text.strip()
-                # Formatul KML este: longitudine,latitudine,altitudine
-                parts = coords_str.split(',')
-                if len(parts) >= 2:
-                    lon = float(parts[0].strip())
-                    lat = float(parts[1].strip())
-                    
-                    records.append({
-                        'Nr. Comanda': name_text,
-                        'Adresa_originala': desc_text if desc_text else name_text,
-                        'Latitudine': lat,
-                        'Longitudine': lon,
-                        'Status': 'Poziție Exactă (My Maps)'
-                    })
-                    
+            if tag_name == 'Placemark':
+                # Extragem datele din interiorul acestui Placemark
+                name_text = ""
+                desc_text = ""
+                coords_text = ""
+                
+                for child in elem:
+                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    if child_tag == 'name' and child.text:
+                        name_text = child.text.strip()
+                    elif child_tag == 'description' and child.text:
+                        desc_text = child.text.strip()
+                    elif child_tag == 'Point':
+                        for point_child in child:
+                            pt_tag = point_child.tag.split('}')[-1] if '}' in point_child.tag else point_child.tag
+                            if pt_tag == 'coordinates' and point_child.text:
+                                coords_text = point_child.text.strip()
+                                
+                if coords_text:
+                    # Format standard KML: longitudine,latitudine,altitudine
+                    parts = coords_text.split(',')
+                    if len(parts) >= 2:
+                        try:
+                            lon = float(parts[0].strip())
+                            lat = float(parts[1].strip())
+                            
+                            records.append({
+                                'ID_KML_Potrivire': name_text,
+                                'Latitudine': lat,
+                                'Longitudine': lon,
+                                'Geocoded_address': desc_text if desc_text else "Preluat din My Maps"
+                            })
+                        except ValueError:
+                            pass
+                            
         if len(records) > 0:
             return pd.DataFrame(records), None
         else:
-            return None, "Fișierul KML a fost citit, dar nu s-au găsit puncte geografice (Placemarks)."
+            # Încercare disperată: căutare directă prin Regex dacă XML parserul a ignorat structura
+            import re
+            records_regex = []
+            placemarks_raw = re.findall(r'<Placemark>.*?</Placemark>', utf8_content, re.DOTALL)
+            for pm in placemarks_raw:
+                name_m = re.search(r'<name>(.*?)</name>', pm)
+                coords_m = re.search(r'<coordinates>(.*?)</coordinates>', pm)
+                desc_m = re.search(r'<description>(.*?)</description>', pm)
+                
+                name_t = name_m.group(1).strip() if name_m else "Fără Nume"
+                desc_t = desc_m.group(1).strip() if desc_m else ""
+                
+                if coords_m:
+                    c_parts = coords_m.group(1).strip().split(',')
+                    if len(c_parts) >= 2:
+                        try:
+                            records_regex.append({
+                                'ID_KML_Potrivire': name_t,
+                                'Latitudine': float(c_parts[1].strip()),
+                                'Longitudine': float(c_parts[0].strip()),
+                                'Geocoded_address': desc_t if desc_t else "Preluat din My Maps (Regex)"
+                            })
+                        except ValueError:
+                            pass
+            if len(records_regex) > 0:
+                return pd.DataFrame(records_regex), None
+                
+            return None, "Nu s-au găsit puncte geografice în fișier. Asigură-te că ai selectat formatul KML la export din My Maps."
     except Exception as e:
         return None, f"Eroare la procesarea fișierului KML: {str(e)}"
 
@@ -62,75 +114,74 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-# --- Sample Data Generator ---
-def get_sample_data():
-    orders_data = {
-        'Nr. Comanda': [f"ORD-{i:03d}" for i in range(1, 6)],
-        'First Name (Shipping)': ['Ion', 'Maria', 'Dan', 'Grigore', 'Oana'],
-        'Last Name (Shipping)': ['Popescu', 'Ionescu', 'Vasile', 'Elena', 'Gheltu'],
-        'Phone (Billing)': ['0722111222', '0733222333', '0744333444', '0786440547', '0720015842'],
-        'Adresa': ['Bulevardul Unirii 10, Bucuresti', 'Strada Lipscani 22, Bucuresti', 'Soseaua Oltenitei 40, Bucuresti', 'Calea Mosilor 112, Bucuresti', 'Strada Lanariei 126, Bucuresti'],
-        'Latitudine': [44.4261, 44.4325, 44.4011, 44.4389, 44.4172],
-        'Longitudine': [26.1024, 26.1001, 26.1189, 26.1122, 26.1031],
-        'Status': ['Coordonate Demo'] * 5
-    }
-    couriers_data = {
-        'Curier_ID': ['C01', 'C02'],
-        'Nume_curier': ['Alex Curier', 'Mihai Transport'],
-        'Activ': [True, True],
-        'Punct_plecare': ['Piata Unirii, Bucuresti', 'Piata Victoriei, Bucuresti'],
-        'Punct_finalizare': ['Piata Unirii, Bucuresti', 'Piata Victoriei, Bucuresti'],
-        'Capacitate_max_livrari': [20, 20]
-    }
-    return pd.DataFrame(orders_data), pd.DataFrame(couriers_data)
-
-# --- Standardizer ---
-def standardize_couriers_df(df):
+# --- Standardizer / Column Mapper ---
+def standardize_orders_df(df):
     df = df.copy()
-    if 'Curier_ID' not in df.columns: df['Curier_ID'] = [f"C{i}" for i in range(1, len(df)+1)]
-    if 'Nume_curier' not in df.columns: df['Nume_curier'] = df['Curier_ID']
-    if 'Activ' not in df.columns: df['Activ'] = True
-    if 'Capacitate_max_livrari' not in df.columns: df['Capacitate_max_livrari'] = 20
-    df['Activ'] = df['Activ'].apply(lambda x: str(x).strip().lower() in ['true', '1', 'da', 'yes', 'active'])
-    return df
+    original_cols = list(df.columns)
+    clean_cols = [str(c).strip() for c in df.columns]
+    df.columns = clean_cols
+    
+    mapping = {
+        'ID_Livrare': ['Nr. Comanda', 'ID_Livrare', 'Id', 'ID', 'Cod'],
+        'Client': ['First Name (Shipping)', 'Client', 'Nume', 'Name', 'Destinatar'],
+        'Telefon': ['Phone (Billing)', 'Telefon', 'Phone', 'Tel', 'Phone_Billing'],
+        'Adresa_originala': ['Adresa', 'Adresa_originala', 'Address', 'Adresă', 'Full Address']
+    }
+    
+    for system_col, user_options in mapping.items():
+        if system_col not in df.columns:
+            for option in user_options:
+                if option in df.columns:
+                    df[system_col] = df[option]
+                    break
+            if system_col not in df.columns:
+                df[system_col] = ""
+                
+    return df, original_cols
 
 # --- Core Routing Algorithm ---
-def generate_optimized_routes(orders_df, df_couriers):
-    couriers = standardize_couriers_df(df_couriers)
-    active_couriers = couriers[couriers['Activ'] == True].copy()
-    
-    if len(active_couriers) == 0:
-        return None, "Nu există curieri activi în sistem."
-    
-    # Coordonate implicite pentru punctele de start curieri (Centrul Bucureștiului)
-    c_coords = {}
-    for idx, row in active_couriers.iterrows():
-        c_coords[row['Curier_ID']] = {
-            'start_lat': 44.4325, 'start_lon': 26.1001,
-            'end_lat': 44.4325, 'end_lon': 26.1001
-        }
+def generate_optimized_routes(orders_df, original_columns):
+    # Generăm automat 3 curieri impliciți pentru a simplifica procesul dispecerului
+    couriers_data = {
+        'Curier_ID': ['C01', 'C02', 'C03'],
+        'Nume_curier': ['Curier Principal 1', 'Curier Principal 2', 'Curier Principal 3'],
+        'Capacitate_max_livrari': [20, 20, 20]
+    }
+    active_couriers = pd.DataFrame(couriers_data)
 
-    # Pregătire structură tabel final
+    # Coordonate implicite de start (Centrul Bucureștiului - Piața Unirii)
+    c_coords = {
+        'C01': {'start_lat': 44.4261, 'start_lon': 26.1024, 'end_lat': 44.4261, 'end_lon': 26.1024},
+        'C02': {'start_lat': 44.4325, 'start_lon': 26.1001, 'end_lat': 44.4325, 'end_lon': 26.1001},
+        'C03': {'start_lat': 44.4011, 'start_lon': 26.1189, 'end_lat': 44.4011, 'end_lon': 26.1189}
+    }
+
     orders = orders_df.copy()
-    for col in ['Curier', 'Secventa', 'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie']:
-        orders[col] = ""
+    for col in ['Curier', 'Secventa', 'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie', 'Status']:
+        if col not in orders.columns:
+            orders[col] = ""
 
     courier_tracks = {c_id: [] for c_id in active_couriers['Curier_ID']}
     courier_counts = {c_id: 0 for c_id in active_couriers['Curier_ID']}
     
-    unassigned_orders = orders.to_dict('records')
+    # Împărțim în comenzi care au coordonate valide din KML și cele care nu au
+    routable_items = orders[orders['Latitudine'].notna() & orders['Longitudine'].notna()].to_dict('records')
+    unroutable = orders[orders['Latitudine'].isna() | orders['Longitudine'].isna()].copy()
     
-    while len(unassigned_orders) > 0:
+    if len(routable_items) == 0:
+        return None, "Nicio comandă din Excel nu s-a putut potrivi cu punctele din My Maps. Verificați ID-urile."
+
+    while len(routable_items) > 0:
         best_score = float('inf')
         best_courier = None
         best_order_idx = None
         
-        for idx, ord_item in enumerate(unassigned_orders):
+        for idx, ord_item in enumerate(routable_items):
             for _, c_row in active_couriers.iterrows():
                 c_id = c_row['Curier_ID']
-                max_capacity = int(c_row.get('Capacitate_max_livrari', 20))
+                max_capacity = int(c_row['Capacitate_max_livrari'])
                 
-                if courier_counts[c_id] >= min(max_capacity, 20):
+                if courier_counts[c_id] >= max_capacity:
                     continue
                     
                 c_loc = c_coords[c_id]
@@ -154,10 +205,15 @@ def generate_optimized_routes(orders_df, df_couriers):
         if best_courier is None:
             break
             
-        chosen_order = unassigned_orders.pop(best_order_idx)
+        chosen_order = routable_items.pop(best_order_idx)
         chosen_order['Curier_alocat'] = best_courier
         courier_tracks[best_courier].append(chosen_order)
         courier_counts[best_courier] += 1
+
+    # Dacă rămân ordine din lipsă de capacitate
+    for left_item in routable_items:
+        left_item['Status'] = 'Depășire Capacitate (Maxim 20/curier)'
+        unroutable = pd.concat([unroutable, pd.DataFrame([left_item])], ignore_index=True)
 
     final_route_records = []
     
@@ -167,6 +223,7 @@ def generate_optimized_routes(orders_df, df_couriers):
         if not track:
             continue
             
+        # Sortează traseul (Nearest Neighbor)
         sequenced_track = []
         curr_lat = c_coords[c_id]['start_lat']
         curr_lon = c_coords[c_id]['start_lon']
@@ -203,76 +260,131 @@ def generate_optimized_routes(orders_df, df_couriers):
             while current_window_idx < len(windows) and current_time > windows[current_window_idx][1]:
                 current_window_idx += 1
                 
-            if current_window_idx >= len(windows):
-                applied_slot = "După 20:00"
-            else:
-                applied_slot = windows[current_window_idx][2]
+            applied_slot = windows[current_window_idx][2] if current_window_idx < len(windows) else "După 20:00"
             
             stop['Curier'] = c_row['Nume_curier']
             stop['Secventa'] = seq
             stop['Ora_estimata_sosire'] = arrival_time_str
             stop['Slot_fix_livrare'] = applied_slot
-            stop['Regula_slot_aplicata'] = "Păstrat în primul slot" if seq <= 2 else "Alocat dinamic pe bază ETA"
-            stop['Link_navigatie'] = f"http://maps.google.com/maps?q={stop['Latitudine']},{stop['Longitudine']}"
+            stop['Regula_slot_aplicata'] = "Păstrat în primul slot" if seq <= 2 else "Alocat dinamic"
+            stop['Link_navigatie'] = f"http://maps.google.com/?q={stop['Latitudine']},{stop['Longitudine']}"
+            stop['Status'] = 'Optimizat Exact'
             
             final_route_records.append(stop)
             current_time += timedelta(minutes=20) # 10 min stop + 10 min buffer
 
-    df_final = pd.DataFrame(final_route_records) if final_route_records else pd.DataFrame()
-    return df_final, None
+    df_routed = pd.DataFrame(final_route_records) if final_route_records else pd.DataFrame()
+    
+    if not df_routed.empty and not unroutable.empty:
+        df_final_output = pd.concat([df_routed, unroutable], ignore_index=True)
+    elif not df_routed.empty:
+        df_final_output = df_routed
+    else:
+        df_final_output = unroutable
+
+    new_system_cols = ['Curier', 'Secventa', 'Ora_estimata_sosire', 'Slot_fix_livrare', 'Regula_slot_aplicata', 'Link_navigatie', 'Status', 'Latitudine', 'Longitudine']
+    final_cols_order = original_columns + [c for c in new_system_cols if c not in original_columns]
+    existing_cols_order = [c for c in final_cols_order if c in df_final_output.columns]
+    
+    return df_final_output[existing_cols_order], unroutable
 
 # --- UI Interface ---
-st.title("🚚 RoRoute - Planificator cu Import direct din Google My Maps")
-st.subheader("Folosește poziționările tale perfecte din hărți")
+st.title("🚚 RoRoute - Planificator Automat (Excel + Google My Maps)")
+st.subheader("Sistem profesional bazat pe coordonate exacte verificate")
 
-mode = st.sidebar.radio("Sursă Date Adrese", ["Încarcă fișier KML din My Maps", "Mod Demo (Date Test)"])
+import re
 
-orders_df, couriers_df = None, None
+# Încarcă ambele fișiere simultan
+st.sidebar.markdown("### 📋 Încărcare Date Sincronizate")
+uploaded_excel = st.sidebar.file_uploader("1. Încarcă Tabelul Excel/CSV cu Comenzi", type=["csv", "xlsx"])
+uploaded_kml = st.sidebar.file_uploader("2. Încarcă Harta KML din Google My Maps", type=["kml"])
 
-if mode == "Mod Demo (Date Test)":
-    orders_df, couriers_df = get_sample_data()
-else:
-    st.sidebar.markdown("### 1. Încarcă Harta de adrese (.kml)")
-    uploaded_kml = st.sidebar.file_uploader("Încarcă fișierul descărcat din My Maps", type=["kml"])
+orders_final_df = None
+original_columns_list = []
+
+if uploaded_excel and uploaded_kml:
+    # Pasul A: Citire tabel comenzi original
+    if uploaded_excel.name.endswith('.csv'):
+        df_raw = pd.read_csv(uploaded_excel)
+    else:
+        df_raw = pd.read_excel(uploaded_excel)
+        
+    orders_mapped, original_columns_list = standardize_orders_df(df_raw)
     
-    if uploaded_kml:
-        parsed_df, err = parse_kml_to_dataframe(uploaded_kml)
-        if err:
-            st.sidebar.error(err)
-        else:
-            orders_df = parsed_df
-            st.sidebar.success(f"✅ S-au încărcat {len(orders_df)} adrese din Google My Maps!")
-            
-    # Configurație automată curieri simplă
-    couriers_df = pd.DataFrame({
-        'Curier_ID': ['C01', 'C02', 'C03'],
-        'Nume_curier': ['Curier Traseu 1', 'Curier Traseu 2', 'Curier Traseu 3'],
-        'Activ': [True, True, True]
-    })
-
-if orders_df is not None:
-    st.markdown("### 📋 Adrese active preluate cu coordonate exacte")
-    st.dataframe(orders_df, use_container_width=True)
+    # Pasul B: Citire fișier KML din My Maps
+    kml_df, err = parse_kml_flexible(uploaded_kml)
     
-    if st.button("🚀 Optimizează Traseele pe Baza Hărții", type="primary"):
-        routes_res, _ = generate_optimized_routes(orders_df, couriers_df)
+    if err:
+        st.error(err)
+    else:
+        # Pasul C: Corelarea inteligentă între Excel și My Maps
+        # Ne asigurăm că ID-urile sunt comparate curat sub formă de text curățat
+        orders_mapped['ID_String_Match'] = orders_mapped['ID_Livrare'].astype(str).str.strip().str.lower()
+        kml_df['ID_String_Match'] = kml_df['ID_KML_Potrivire'].astype(str).str.strip().str.lower()
+        
+        # Eliminăm duplicatele din KML pentru a nu multiplica rândurile din Excel
+        kml_df = kml_df.drop_duplicates(subset=['ID_String_Match'])
+        
+        # Facem îmbinarea datelor (Merge) păstrând TOATE rândurile din Excel
+        merged_df = pd.merge(orders_mapped, kml_df[['ID_String_Match', 'Latitudine', 'Longitudine']], on='ID_String_Match', how='left')
+        merged_df.drop(columns=['ID_String_Match'], errors='ignore')
+        
+        orders_final_df = merged_df
+        st.sidebar.success(f"📊 S-au conectat cu succes datele din Excel cu hărțile!")
+
+# Afișare interfață de control
+if orders_final_df is not None:
+    st.info("✨ Datele din ambele fișiere au fost corelate. Puteți lansa optimizarea traseelor.")
+    
+    if st.button("🚀 Generează Traseele Optimizate", type="primary"):
+        routes_res, unrouted_df = generate_optimized_routes(orders_final_df, original_columns_list)
         
         if routes_res is not None and not routes_res.empty:
-            st.success("✅ Traseele au fost calculate folosind punctele exacte!")
+            st.success("✅ Algoritmul a finalizat organizarea curierilor!")
             
-            st.markdown("### 🗺️ Vizualizare Trasee Optimizate")
-            st.map(routes_res[['Latitudine', 'Longitudine']].rename(columns={'Latitudine': 'latitude', 'Longitudine': 'longitude'}))
+            # KPI Cards
+            routes_only = routes_res[routes_res['Status'] == 'Optimizat Exact']
+            total_allocated = len(routes_only)
             
-            st.markdown("### 🗺️ Tabel Trasee Finale")
+            kpi_cols = st.columns(3)
+            kpi_cols[0].metric("Total Comenzi Alocate", total_allocated)
+            kpi_cols[1].metric("Curieri Pe Traseu", routes_only['Curier'].nunique() if total_allocated > 0 else 0)
+            kpi_cols[2].metric("Comenzi fără coordonate în KML", len(routes_res[routes_res['Status'] != 'Optimizat Exact']))
+            
+            # Mapă Interactivă
+            if total_allocated > 0:
+                st.markdown("### 🗺️ Vizualizare Trasee Curieri")
+                map_data = routes_only[['Latitudine', 'Longitudine']].dropna().rename(columns={'Latitudine': 'latitude', 'Longitudine': 'longitude'})
+                st.map(map_data)
+                
+                st.markdown("#### ⚖️ Timpi de Finalizare și Încărcare")
+                balance_summary = []
+                for c_name, group in routes_only.groupby('Curier'):
+                    balance_summary.append({
+                        'Curier': c_name,
+                        'Număr Comenzi': len(group),
+                        'Prima Livrare': group['Ora_estimata_sosire'].min(),
+                        'Ultima Livrare (Ora Finish)': group['Ora_estimata_sosire'].max(),
+                        'Sloturi Orice': ", ".join(group['Slot_fix_livrare'].astype(str).unique())
+                    })
+                st.table(pd.DataFrame(balance_summary))
+            
+            # Alerte
+            unmatched_addresses = routes_res[routes_res['Status'] != 'Optimizat Exact']
+            if not unmatched_addresses.empty:
+                st.warning("⚠️ Următoarele comenzi din Excel nu au fost găsite în fișierul KML (Verificați dacă Numele punctului din My Maps coincide cu Nr. Comandă din Excel):")
+                st.dataframe(unmatched_addresses[['ID_Livrare', 'Client', 'Adresa_originala']], use_container_width=True)
+
+            st.markdown("### 🗺️ Tabel Trasee Finale (Conține toate coloanele tale originale)")
             st.dataframe(routes_res.sort_values(by=['Curier', 'Secventa']), use_container_width=True)
             
             csv_buffer = io.StringIO()
             routes_res.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
             st.download_button(
-                label="📥 Descarcă Fișier Trasee (Format CSV)",
+                label="📥 Descarcă Fișier Trasee Complet (Format CSV)",
                 data=csv_buffer.getvalue(),
-                file_name="Rute_Perfecte_MyMaps.csv",
+                file_name=f"Trasee_Complete_MyMaps_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
 else:
-    st.info("💡 Exportă harta din My Maps ca fișier .kml și încarcă-l în meniul din stânga pentru a rula aplicația cu precizie chirurgicală.")
+    st.info("💡 Pentru a rula optimizarea exactă, vă rugăm să încărcați în bara din stânga AMBELE fișiere: Tabelul Excel de comenzi și Fișierul KML exportat din My Maps.")
