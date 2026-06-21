@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Medii virtuale
+venv/
+.venv/
+env/
+
+# Streamlit cache local
+.streamlit/
+
+# Fișiere de date locale (opțional, pentru a nu urca datele clienților pe GitHub)
+*.xlsx
+*.xls
+*.csv
+.DS_Store
