@@ -116,13 +116,13 @@ def map_columns_robustly(df):
 # --- Core Routing Algorithm ---
 def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
     orders = orders_df.copy()
+    mapped_fields = map_columns_robustly(orders)
     
-    # Adăugăm coloanele geo garantat pentru a evita pierderea lor din sesiune
     orders['Latitudine'] = np.nan
     orders['Longitudine'] = np.nan
     orders['Status_Geocode'] = "Negeocodat"
 
-    # 1. Geocodare adrese din tabel folosind coloana securizată 'Adresa_Sist_Geo'
+    # 1. Geocodare adrese din tabel folosind exclusiv coloana securizată independentă
     with st.spinner("Geocodare și localizare adrese clienți..."):
         for idx, row in orders.iterrows():
             lat, lon, _, id_type = geocode_address_bulletproof(row['Adresa_Sist_Geo'])
@@ -136,7 +136,7 @@ def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
         lat_s, lon_s, _, _ = geocode_address_bulletproof(row['Punct_plecare'])
         c_coords[row['Curier_ID']] = {'start_lat': lat_s, 'start_lon': lon_s, 'name': row['Nume_curier']}
 
-    # 3. Clustering / Alocare Geografică Echilibrată
+    # 3. Clustering / Alocare Geografică Uniformă și Proporțională
     unassigned_orders = orders.to_dict('records')
     courier_lists = {c_id: [] for c_id in c_coords.keys()}
     
@@ -158,6 +158,7 @@ def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
                 base_lon = c_loc['start_lon']
                 
             dist = haversine_distance(ord_item['Latitudine'], ord_item['Longitudine'], base_lat, base_lon)
+            # Factorul penalizator de 12.0 oprește aglomerarea și distribuie uniform comenzile pe toți curierii
             score = dist + (len(courier_lists[c_id]) * 12.0)
             
             if score < best_dist:
@@ -167,9 +168,8 @@ def generate_optimized_routes(orders_df, df_active_couriers, original_columns):
         if best_c is not None:
             courier_lists[best_c].append(ord_item)
 
-    # 4. Secvențiere rute și generare intervale orare
+    # 4. Secvențiere rute și generare intervale orare (Plecare la 09:30)
     final_records = []
-    mapped_fields = map_columns_robustly(orders)
     curier_target = mapped_fields.get('Curier', 'Curier')
     interval_target = mapped_fields.get('Interval Livrare', 'Interval Livrare')
 
@@ -240,30 +240,33 @@ if df_couriers_raw is not None:
 if uploaded_orders and st.session_state.orders_df is None:
     df_raw = pd.read_csv(uploaded_orders) if uploaded_orders.name.endswith('.csv') else pd.read_excel(uploaded_orders)
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    
+    # FIX DEFINITIV: Mapăm și salvăm coloana de siguranță acum, direct la citirea fișierului, ferită de starea Streamlit Editor
+    m_fields = map_columns_robustly(df_raw)
+    addr_col = m_fields.get('Adresa', 'Adresa')
+    df_raw['Adresa_Sist_Geo'] = df_raw[addr_col]
+    
     st.session_state.orders_df = df_raw
 
 if st.session_state.orders_df is not None and not active_couriers_df.empty:
     mapped_fields = map_columns_robustly(st.session_state.orders_df)
-    addr_real_col = mapped_fields.get('Adresa', 'Adresa')
-    
-    # ATAC MATRICEAL ANTI-KEYERROR: Injectăm coloana de siguranță text de sistem chiar acum
-    st.session_state.orders_df['Adresa_Sist_Geo'] = st.session_state.orders_df[addr_real_col]
+    curier_col = mapped_fields.get('Curier', 'Curier')
+    interval_col = mapped_fields.get('Interval Livrare', 'Interval Livrare')
     
     st.markdown("### 📝 1. Corectare Erori Text (Dublu-click pe celule pentru a edita adresele live)")
+    # Randăm editorul pentru tabelul de comenzi original
     edited_df = st.data_editor(st.session_state.orders_df, use_container_width=True, key="comenzi_editor")
     
     if st.button("🚀 Pasul 2: Calculează Distribuția și Traseele Optimizate", type="primary"):
-        # Asigurăm persistența coloanei noastre după editare
-        edited_df['Adresa_Sist_Geo'] = edited_df[addr_real_col]
-        original_cols = list(edited_df.columns)
+        # Ne asigurăm că adresele eventual editate de dispecer sunt transmise mai departe în siguranță
+        addr_col_edited = mapped_fields.get('Adresa', 'Adresa')
+        edited_df['Adresa_Sist_Geo'] = edited_df[addr_col_edited]
         
+        original_cols = list(edited_df.columns)
         st.session_state.final_display_df = generate_optimized_routes(edited_df, active_couriers_df, original_cols)
-        st.success("✅ Rutele au fost calculate echilibrat pe toți curierii activi!")
+        st.success("✅ Rutele au fost calculate geografic și echilibrat!")
 
     if st.session_state.final_display_df is not None:
-        curier_col = mapped_fields.get('Curier', 'Curier')
-        interval_col = mapped_fields.get('Interval Livrare', 'Interval Livrare')
-
         st.markdown("### ⚙️ 2. Panou Ajustare și Alocare Manuală Curieri")
         st.info("💡 Poți schimba manual Curierul sau Intervalul direct din tabel. Schimbările vor muta instant pinii pe harta de mai jos:")
         
@@ -273,7 +276,7 @@ if st.session_state.orders_df is not None and not active_couriers_df.empty:
         if interval_col in st.session_state.final_display_df.columns:
             column_config[interval_col] = st.column_config.SelectboxColumn("Fereastră Orare", options=["09:00-11:00", "10:00-12:00", "11:00-13:00", "12:00-14:00", "13:00-15:00", "14:00-16:00", "15:00-17:00", "16:00-18:00"], width="medium")
             
-        adjusted_final_df = st.data_editor(st.session_state.final_display_df, use_container_width=True, column_config=column_config, key="ajustare_parcurs_final")
+        adjusted_final_df = st.data_editor(st.session_state.final_display_df, use_container_width=True, column_config=column_config, key="ajustare_parcurs_final_matrix")
         
         # --- VIZUALIZARE HARTĂ INTERACTIVĂ DINAMICĂ ---
         st.markdown("### 🗺️ Vizualizare Trasee pe Hartă Interactivă")
@@ -287,7 +290,7 @@ if st.session_state.orders_df is not None and not active_couriers_df.empty:
         kpi_cols[1].metric("Curieri Pe Traseu", adjusted_final_df[curier_col].dropna().nunique() if curier_col in adjusted_final_df.columns else 0)
         kpi_cols[2].metric("Plafon Maxim Adrese / Om", "20 pachete")
 
-        # Păstrăm exclusiv capătul de tabel original pentru fișierul descărcat
+        # Păstrăm exclusiv capătul de tabel original pentru fișierul descărcat (fără coloane tehnice ascunse)
         original_base_cols = [c for c in list(st.session_state.orders_df.columns) if c != 'Adresa_Sist_Geo']
         clean_download_df = adjusted_final_df[[c for c in original_base_cols if c in adjusted_final_df.columns]]
 
@@ -297,7 +300,6 @@ if st.session_state.orders_df is not None and not active_couriers_df.empty:
             label="📥 Descarcă Fișierul Final Ajustat Operativ",
             data=csv_buffer.getvalue(),
             file_name="Trasee_Sincronizate_Respectate.csv",
-            navigate_on_click=True,
             mime="text/csv"
         )
 else:
