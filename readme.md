@@ -1,17 +1,24 @@
-# RoRoute - Automated Courier Route Planner
+# 🚚 Smart Routing System (București - Ilfov)
 
-An operational, minimalist web application built with Python and Streamlit designed for scheduling and optimizing courier routes across Romania (primarily Bucharest and Ilfov areas).
+O aplicație web inteligentă dezvoltată în **Python** cu **Streamlit** pentru automatizarea, geocodarea strictă, balansarea pe timp și generarea foilor de parcurs (manifest) pentru curieri.
 
-## Features
-- **Smart Geocoding Buffer**: Integrated automated Geocoding with fallback handlers for Romanian addresses powered by `geopy` and OpenStreetMap.
-- **Dynamic Balancing Constraints**: Distributes orders among 1-4 couriers balancing finish times, geographical corridors, and a max limit of 20 packages per driver.
-- **Fixed Delivery Slots**: Automatically assigns fixed 2-hour interval slots matching estimated times of arrival (ETA) with a built-in 10-minute operational buffer per stop.
-- **Instant Export View**: Features quick execution dashboards and single-click CSV downloads for integration with navigation systems.
+## ✨ Caracteristici Principale
 
-## Local Installation and Execution
+1. **Gestionare & Validare Curieri:** Suport multiplu (culori unice per traseu), definire puncte de start/sosire și validare geografică strictă prin coordonate.
+2. **Import Inteligent (Mapper):** Încărcare fișiere Excel/CSV (ex: WooCommerce) cu asociere dinamică a coloanelor pentru Adresă, Nume, Telefon și Ramburs.
+3. **Filtrare Geografică B/IF:** Geocodare automată prin Nominatim API cu sistem de siguranță teritorială (*Bounding Box*) care izolează adresele din afara București / Ilfov.
+4. **Algoritm de Balansare pe Timp:** Distribuție euristică bazată pe timpul acumulativ de condus (estimat prin OSRM API la ~35km/h în mediul urban) + un timp fix de 5 minute alocat per client.
+5. **Hartă Interactivă Leaflet:** Afișarea rutelor reale și ferestre pop-up interactive cu detalii de livrare.
+6. **Export Manifest:** Generare fișier Excel structurat pe tab-uri dedicate pentru fiecare curier, pregătit pentru teren.
 
-1. Clone or download this project's code directory files.
-2. Open your command terminal inside the project directory folder.
-3. Install the required modules using `pip`:
-   ```bash
-   pip install -r requirements.txt
+---
+
+## 🚀 Ghid de Instalare și Rulare Locală
+
+### Prerechizite
+Asigură-te că ai **Python 3.9+** instalat pe sistemul tău.
+
+### 1. Clonarea repository-ului
+```bash
+git clone [https://github.com/utilizator/smart-routing-app.git](https://github.com/utilizator/smart-routing-app.git)
+cd smart-routing-app
