@@ -6,11 +6,47 @@ import requests
 from geopy.geocoders import Nominatim
 from datetime import datetime, timedelta
 import io
+import sqlite3
+from ortools.constraint_solver import routing_enums_pb2
+from ortools.constraint_solver import pywrapcp
 
-# Configurare pagină Streamlit
-st.set_page_config(page_title="Smart Routing B/IF", layout="wide")
+st.set_page_config(page_title="Smart Routing Pro B/IF", layout="wide")
 
-# --- INIȚIALIZARE STATE (Memorie aplicație) ---
+# --- 1. CONFIGURARE BAZĂ DE DATE (CACHE ADRESE) ---
+def init_db():
+    conn = sqlite3.connect('cache_adrese.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS geocache (
+            adresa TEXT PRIMARY KEY,
+            lat REAL,
+            lon REAL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_cached_coords(adresa):
+    conn = sqlite3.connect('cache_adrese.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT lat, lon FROM geocache WHERE adresa = ?', (adresa,))
+    row = cursor.fetchone()
+    conn.close()
+    return row if row else None
+
+def set_cached_coords(adresa, lat, lon):
+    conn = sqlite3.connect('cache_adrese.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('INSERT OR REPLACE INTO geocache (adresa, lat, lon) VALUES (?, ?, ?)', (adresa, lat, lon))
+        conn.commit()
+    except:
+        pass
+    conn.close()
+
+init_db()
+
+# --- INITIALIZARE STATE ---
 if 'curieri' not in st.session_state:
     st.session_state.curieri = {
         'Curier 1': {'start_addr': 'Bucuresti, Piata Unirii', 'start_time': '09:00', 'color': 'blue', 'confirmed': False, 'coords': None},
@@ -20,237 +56,219 @@ if 'curieri' not in st.session_state:
 if 'comenzi' not in st.session_state:
     st.session_state.comenzi = pd.DataFrame()
 
-# Limite Bounding Box pentru București și Ilfov (Filtrare geografică)
 LAT_MIN, LAT_MAX = 44.15, 44.75
 LON_MIN, LON_MAX = 25.70, 26.45
+geolocator = Nominatim(user_agent="smart_routing_enterprise_2026")
 
-# Inițializare Geolocator cu User Agent unic pentru respectarea politicilor OpenStreetMap
-geolocator = Nominatim(user_agent="smart_routing_app_v2_2026")
-
-# --- FUNCȚII AJUTATOARE ---
+# --- GEOCRARE CU INTEGRARE CACHE ---
 def valideaza_adresa(adresa):
-    """Transformă adresa text în coordonate și verifică dacă e în Bounding Box-ul B/IF"""
+    adresa_curata = adresa.strip().lower()
+    
+    # Încercăm să luăm din Cache-ul SQL local (0 ms timp de așteptare)
+    cached = get_cached_coords(adresa_curata)
+    if cached:
+        return True, cached
+
+    # Dacă nu există în cache, apelăm API-ul extern
     try:
         location = geolocator.geocode(adresa + ", Romania", timeout=10)
         if location:
             if LAT_MIN <= location.latitude <= LAT_MAX and LON_MIN <= location.longitude <= LON_MAX:
+                set_cached_coords(adresa_curata, location.latitude, location.longitude)
                 return True, (location.latitude, location.longitude)
             return False, "În afara zonei B/IF"
         return False, "Adresă negăsită"
     except:
-        return False, "Eroare API Localizare"
+        return False, "Eroare API"
 
-def get_osrm_route(start_coords, end_coords):
-    """Apelează API-ul public OSRM pentru a calcula distanța și timpul rutier real"""
-    url = f"http://router.project-osrm.org/route/v1/driving/{start_coords[1]},{start_coords[0]};{end_coords[1]},{end_coords[0]}?overview=simplified"
+def get_osrm_time(start_coords, end_coords):
+    url = f"http://router.project-osrm.org/route/v1/driving/{start_coords[1]},{start_coords[0]};{end_coords[1]},{end_coords[0]}?overview=false"
     try:
-        response = requests.get(url, timeout=5).json()
+        response = requests.get(url, timeout=3).json()
         if response['code'] == 'Ok':
-            route = response['routes'][0]
-            # Convertim din metri în km și din secunde în minute
-            return route['distance'] / 1000, route['duration'] / 60, route['geometry']
+            return int(response['routes'][0]['duration'] / 60) # Returnează minute întregi
     except:
         pass
-    # Fallback euristic la viteză medie urbană de 35 km/h în caz de eroare API
-    return 5.0, 10.0, None 
+    return 15 # Fallback urban standard generic în minute
 
-# --- INTERFAȚA UTILIZATOR (UI) ---
-st.title("🚚 Sistem Automat de Alocare și Optimizare Trasee (B/IF)")
-st.markdown("Aplicație logistică pentru geocodare strictă, distribuție echilibrată pe timp și generare manifest.")
+# --- INTERFAȚĂ ---
+st.title("🚀 Smart Routing Enterprise (OR-Tools & SQL Cache)")
 
-tab1, tab2, tab3 = st.tabs(["👥 1. Curieri & Configurare", "📦 2. Import & Validare Comenzi", "🗺️ 3. Optimizare & Trasee Active"])
+tab1, tab2, tab3 = st.tabs(["👥 1. Flotă Curieri", "📦 2. Import Inteligent", "🗺️ 3. Optimizare Matematică"])
 
-# --- TAB 1: GESTIONARE CURIERI ---
 with tab1:
-    st.header("Gestionare și Validare Curieri")
+    st.header("Configurare Flotă")
     cols = st.columns(3)
-    
     for idx, (nume, date) in enumerate(st.session_state.curieri.items()):
         with cols[idx]:
             st.subheader(f"🎨 {nume}", divider=date['color'])
-            addr = st.text_input(f"Punct de plecare", value=date['start_addr'], key=f"addr_{nume}")
-            time_str = st.text_input("Ora pornire (HH:MM)", value=date['start_time'], key=f"time_{nume}")
-            
-            if st.button(f"Confirmă {nume}", key=f"btn_{nume}"):
-                succes, rezultat = valideaza_adresa(addr)
+            addr = st.text_input(f"Locație Start", value=date['start_addr'], key=f"addr_{nume}")
+            time_str = st.text_input("Ora Start (HH:MM)", value=date['start_time'], key=f"time_{nume}")
+            if st.button(f"Validează {nume}", key=f"btn_{nume}"):
+                succes, rez = valideaza_adresa(addr)
                 if succes:
-                    st.session_state.curieri[nume]['coords'] = rezultat
-                    st.session_state.curieri[nume]['confirmed'] = True
-                    st.session_state.curieri[nume]['start_addr'] = addr
-                    st.session_state.curieri[nume]['start_time'] = time_str
-                    st.success(f"✅ {nume} înregistrat cu succes în B/IF!")
+                    st.session_state.curieri[nume].update({'coords': rez, 'confirmed': True, 'start_addr': addr, 'start_time': time_str})
+                    st.success("✅ Validat!")
                 else:
-                    st.session_state.curieri[nume]['confirmed'] = False
-                    st.error(f"❌ {rezultat}")
+                    st.error(f"❌ {rez}")
 
-# --- TAB 2: IMPORT DATE & MAPPER ---
 with tab2:
-    st.header("Importul și Procesarea Adreselor")
-    
-    uploaded_file = st.file_uploader("Încarcă fișierul Excel sau CSV (Drag & Drop)", type=['xlsx', 'xls', 'csv'])
-    
+    st.header("Procesare Date")
+    uploaded_file = st.file_uploader("Încarcă fișier comenzi", type=['xlsx', 'csv'])
     if uploaded_file:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-            
-        st.write("### Previzualizare fișier încărcat:")
-        st.dataframe(df.head(3))
-        
-        # Sistem dinamic de mapare a coloanelor
-        st.write("### Asociere Coloane (Mapper)")
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
         c1, c2, c3, c4 = st.columns(4)
-        col_adresa = c1.selectbox("Coloana Adresă/Stradă", options=df.columns)
-        col_nume = c2.selectbox("Coloana Nume Client", options=df.columns)
-        col_telefon = c3.selectbox("Coloana Telefon", options=df.columns)
-        col_ramburs = c4.selectbox("Coloana Ramburs (Suma de plată)", options=df.columns)
+        col_adresa = c1.selectbox("Adresă", options=df.columns)
+        col_nume = c2.selectbox("Nume", options=df.columns)
+        col_telefon = c3.selectbox("Telefon", options=df.columns)
+        col_ramburs = c4.selectbox("Ramburs", options=df.columns)
         
-        if st.button("Procesează și Geocodează Strict"):
-            with st.spinner("Se execută geocodarea și filtrarea teritorială..."):
-                coordonate = []
-                statusuri = []
+        if st.button("Rulare Geocodare Inteligentă"):
+            coordonate, statusuri = [], []
+            progress_bar = st.progress(0)
+            
+            for i, row in df.iterrows():
+                succes, rez = valideaza_adresa(str(row[col_adresa]))
+                coordonate.append(rez if succes else (None, None))
+                statusuri.append("Validat" if succes else f"Eroare: {rez}")
+                progress_bar.progress((i + 1) / len(df))
                 
-                for _, row in df.iterrows():
-                    adresa_text = str(row[col_adresa])
-                    succes, rez = valideaza_adresa(adresa_text)
-                    if succes:
-                        coordonate.append(rez)
-                        statusuri.append("Validat")
-                    else:
-                        coordonate.append((None, None))
-                        statusuri.append(f"Eroare: {rez}")
-                
-                # Construcția curată a tabelului finalizat (fără numpy)
-                df['Lat'] = [c[0] for c in coordonate]
-                df['Lon'] = [c[1] for c in coordonate]
-                df['Status_Localizare'] = statusuri
-                df['Nume'] = df[col_nume]
-                df['Telefon'] = df[col_telefon]
-                df['Ramburs'] = pd.to_numeric(df[col_ramburs]).fillna(0)
-                df['Adresa_Curata'] = df[col_adresa]
-                
-                st.session_state.comenzi = df
-                st.success("Geocodare finalizată!")
-                
+            df['Lat'] = [c[0] for c in coordonate]
+            df['Lon'] = [c[1] for c in coordonate]
+            df['Status_Localizare'] = statusuri
+            df['Nume'] = df[col_nume]
+            df['Telefon'] = df[col_telefon]
+            df['Ramburs'] = pd.to_numeric(df[col_ramburs]).fillna(0)
+            df['Adresa_Curata'] = df[col_adresa]
+            st.session_state.comenzi = df
+            st.success("Geocodare completă (adresele noi au fost salvate în baza de date SQL locală).")
+
     if not st.session_state.comenzi.empty:
-        st.write("### Starea Adreselor Procesate")
-        # Marcare vizuală cu roșu pentru erori/adrese în afara Ilfovului
-        st.dataframe(st.session_state.comenzi.style.map(
-            lambda val: 'background-color: #ffcccc' if 'Eroare' in str(val) else '',
-            subset=['Status_Localizare']
-        ))
+        st.dataframe(st.session_state.comenzi.style.map(lambda v: 'background-color: #ffcccc' if 'Eroare' in str(v) else '', subset=['Status_Localizare']))
 
-# --- TAB 3: ALGORITM DE BALANSARE PE TIMP & HARTĂ ---
 with tab3:
-    st.header("Algoritm de Repartizare pe Timp & Vizualizare")
-    
-    all_confirmed = all([date['confirmed'] for date in st.session_state.curieri.values()])
-    
-    if not all_confirmed:
-        st.warning("⚠️ Te rugăm să validezi locația de pornire pentru toți curierii în Tab-ul 1.")
-    elif st.session_state.comenzi.empty:
-        st.warning("⚠️ Te rugăm să încarci și să procesezi o listă de comenzi în Tab-ul 2.")
+    st.header("Motor de Optimizare Globală")
+    if not all([d['confirmed'] for d in st.session_state.curieri.values()]) or st.session_state.comenzi.empty:
+        st.warning("Asigură-te că ai curierii validați și comenzile încărcate.")
     else:
-        if st.button("🚀 Pornire Algoritm de Balansare"):
-            comenzi_valide = st.session_state.comenzi[st.session_state.comenzi['Status_Localizare'] == "Validat"].copy()
+        if st.button("🚀 Generează Trasee Optime (Google OR-Tools)"):
+            comenzi_valide = st.session_state.comenzi[st.session_state.comenzi['Status_Localizare'] == "Validat"].copy().reset_index(drop=True)
             
-            # Inițializare timpi de pornire și vectori rute
-            starea_curieri = {}
-            trasee_finale = {nume: [] for nume in st.session_state.curieri}
+            # --- CONSTRUIRE MATRICE DE TIMPI ---
+            # Colectăm toate punctele: Punctele de start ale curierilor, urmate de clienți
+            list_curieri = list(st.session_state.curieri.items())
+            puncte_start = [date['coords'] for nume, date in list_curieri]
+            puncte_clienti = [(row['Lat'], row['Lon']) for _, row in comenzi_valide.iterrows()]
+            toate_punctele = puncte_start + puncte_clienti
             
-            for nume, date in st.session_state.curieri.items():
-                h, m = map(int, date['start_time'].split(':'))
-                starea_curieri[nume] = {
-                    'timp_curent': datetime(2026, 6, 21, h, m), # Data curentă de simulare
-                    'locatie_curenta': date['coords'],
-                    'total_ramburs': 0
-                }
+            num_locations = len(toate_punctele)
+            num_vehicles = len(list_curieri)
             
-            # Repartizare Greedy bazată pe cel mai mic timp total cumulat în momentul simulării
-            for _, comanda in comenzi_valide.iterrows():
-                dest_coords = (comanda['Lat'], comanda['Lon'])
+            # Matricea de costuri (timp condus + 5 minute fix per drop-off la clienți)
+            matrix = []
+            for i in range(num_locations):
+                row_matrix = []
+                for j in range(num_locations):
+                    if i == j:
+                        row_matrix.append(0)
+                    else:
+                        timp_condus = get_osrm_time(toate_punctele[i], toate_punctele[j])
+                        # Adăugăm 5 minute timp de servire doar dacă destinația (j) este un client
+                        timp_servire = 5 if j >= num_vehicles else 0
+                        row_matrix.append(timp_condus + timp_servire)
+                matrix.append(row_matrix)
                 
-                cel_mai_rapid_curier = None
-                cel_mai_scurt_timp_sosire = datetime.max
+            # --- REZOLVARE VRP CU GOOGLE OR-TOOLS ---
+            manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, list(range(num_vehicles)), list(range(num_vehicles)))
+            routing = pywrapcp.RoutingModel(manager)
+            
+            def time_callback(from_index, to_index):
+                return matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
                 
-                for nume, stare in starea_curieri.items():
-                    _, timp_min, _ = get_osrm_route(stare['locatie_curenta'], dest_coords)
-                    timp_sosire_estimat = stare['timp_curent'] + timedelta(minutes=timp_min)
+            transit_callback_index = routing.RegisterTransitCallback(time_callback)
+            routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+            
+            # Adăugăm dimensiunea de timp pentru balansare corectă
+            routing.AddDimension(transit_callback_index, 0, 480, True, "Time") # Maxim 8 ore (480 min) per traseu
+            time_dimension = routing.GetDimensionOrDie("Time")
+            time_dimension.SetGlobalSpanCostCoefficient(100) # Forțează algoritmul să egaleze timpii totali între curieri
+            
+            search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+            search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+            
+            solution = routing.SolveWithParameters(search_parameters)
+            
+            # --- PROCESARE REZULTATE SOLVER ---
+            if solution:
+                trasee_finale = {nume: [] for nume in st.session_state.curieri}
+                starea_curieri = {}
+                
+                for veh_id in range(num_vehicles):
+                    nume_curier = list_curieri[veh_id][0]
+                    date_curier = list_curieri[veh_id][1]
+                    h, m = map(int, date_curier['start_time'].split(':'))
+                    timp_acumulat = datetime(2026, 6, 21, h, m)
                     
-                    if timp_sosire_estimat < cel_mai_scurt_timp_sosire:
-                        cel_mai_scurt_timp_sosire = timp_sosire_estimat
-                        cel_mai_rapid_curier = nume
-                
-                # Alocare și actualizare status (timp deplasare + 5 minute fix per client)
-                ora_sosire_str = cel_mai_scurt_timp_sosire.strftime("%H:%M")
-                starea_curieri[cel_mai_rapid_curier]['timp_curent'] = cel_mai_scurt_timp_sosire + timedelta(minutes=5)
-                starea_curieri[cel_mai_rapid_curier]['locatie_curenta'] = dest_coords
-                starea_curieri[cel_mai_rapid_curier]['total_ramburs'] += comanda['Ramburs']
-                
-                trasee_finale[cel_mai_rapid_curier].append({
-                    'Ora_Estimata': ora_sosire_str,
-                    'Nume': comanda['Nume'],
-                    'Telefon': comanda['Telefon'],
-                    'Adresa': comanda['Adresa_Curata'],
-                    'Ramburs': comanda['Ramburs'],
-                    'Lat': comanda['Lat'],
-                    'Lon': comanda['Lon']
-                })
-            
-            st.session_state.trasee_finale = trasee_finale
-            st.session_state.starea_curieri = starea_curieri
-            st.success("Optimizarea și balansarea pe timp au fost finalizate cu succes!")
+                    index = routing.Start(veh_id)
+                    index = solution.Value(routing.NextVar(index)) # Sărim peste punctul de start în sine
+                    
+                    total_cash = 0
+                    while not routing.IsEnd(index):
+                        node_id = manager.IndexToNode(index)
+                        client_idx = node_id - num_vehicles
+                        comanda = comenzi_valide.iloc[client_idx]
+                        
+                        # Calculăm ora estimată de sosire reală
+                        prev_node = manager.IndexToNode(solution.Value(routing.PrevVar(index))) if routing.Start(veh_id) != routing.PrevVar(index) else veh_id
+                        timp_deplasare = matrix[prev_node][node_id]
+                        timp_acumulat += timedelta(minutes=int(timp_deplasare))
+                        
+                        trasee_finale[nume_curier].append({
+                            'Ora_Estimata': timp_acumulat.strftime("%H:%M"),
+                            'Nume': comanda['Nume'],
+                            'Telefon': comanda['Telefon'],
+                            'Adresa': comanda['Adresa_Curata'],
+                            'Ramburs': comanda['Ramburs'],
+                            'Lat': comanda['Lat'],
+                            'Lon': comanda['Lon']
+                        })
+                        
+                        total_cash += comanda['Ramburs']
+                        index = solution.Value(routing.NextVar(index))
+                        
+                    starea_curieri[nume_curier] = {'total_ramburs': total_cash}
+                    
+                st.session_state.trasee_finale = trasee_finale
+                st.session_state.starea_curieri = starea_curieri
+                st.success("Matricea globală a fost optimizată cu succes!")
 
-        # Randare Componente Vizuale (Hartă + Tabele Manifest)
+        # --- AFIȘARE HĂRȚI ȘI LINK-URI DE NAVIGAȚIE GPS ---
         if 'trasee_finale' in st.session_state:
-            st.write("### 🗺️ Monitorizare Trasee Active (Leaflet)")
+            m = folium.Map(location=[44.4396, 26.0963], zoom_start=11)
+            for nume, date in st.session_state.curieri.items():
+                if date['coords']:
+                    folium.Marker(date['coords'], tooltip=f"START: {nume}", icon=folium.Icon(color=date['color'], icon='home')).add_to(m)
             
-            # Centrare implicită pe București
-            harta = folium.Map(location=[44.4396, 26.0963], zoom_start=11)
-            
-            # Adăugare Hub-uri/Puncte de pornire curieri
-            for nume, detalii in st.session_state.curieri.items():
-                if detalii['coords']:
-                    folium.Marker(
-                        detalii['coords'], 
-                        tooltip=f"START: {nume} ({detalii['start_time']})", 
-                        icon=folium.Icon(color=detalii['color'], icon='home')
-                    ).add_to(harta)
-            
-            # Adăugare clienți alocați pe hartă, colorați per curier responsabil
-            for nume_curier, comenzi_alocate in st.session_state.trasee_finale.items():
+            for nume_curier, comenzi in st.session_state.trasee_finale.items():
                 culoare = st.session_state.curieri[nume_curier]['color']
-                for idx, c in enumerate(comenzi_alocate):
-                    popup_content = f"<b>{idx+1}. Ora {c['Ora_Estimata']}</b><br><b>Client:</b> {c['Nume']}<br><b>Telefon:</b> {c['Telefon']}<br><b>Ramburs:</b> {c['Ramburs']} RON"
-                    folium.Marker(
-                        [c['Lat'], c['Lon']],
-                        popup=folium.Popup(popup_content, max_width=300),
-                        tooltip=f"{nume_curier} - Oprirea {idx+1}",
-                        icon=folium.Icon(color=culoare, icon='user')
-                    ).add_to(harta)
+                for idx, c in enumerate(comenzi):
+                    waze_url = f"https://waze.com/ul?ll={c['Lat']},{c['Lon']}&navigate=yes"
+                    gmaps_url = f"https://www.google.com/maps/search/?api=1&query={c['Lat']},{c['Lon']}"
+                    
+                    popup_html = f"""
+                    <b>{idx+1}. Ora {c['Ora_Estimata']}</b><br>
+                    Client: {c['Nume']}<br>
+                    Telefon: {c['Telefon']}<br>
+                    <a href='{waze_url}' target='_blank' style='color: #2da1c7; font-weight:bold;'>🚗 Deschide în Waze</a><br>
+                    <a href='{gmaps_url}' target='_blank' style='color: #4285F4; font-weight:bold;'>🗺️ Deschide în Google Maps</a>
+                    """
+                    folium.Marker([c['Lat'], c['Lon']], popup=folium.Popup(popup_html, max_width=250), icon=folium.Icon(color=culoare, icon='user')).add_to(m)
             
-            st_folium(harta, width=1300, height=500)
+            st_folium(m, width=1300, height=500)
             
-            # Centralizare și export final manifest
-            st.write("### 📋 Foi de Parcurs și Sumar Financiar")
-            
-            excel_data = io.BytesIO()
-            with pd.ExcelWriter(excel_data, engine='openpyxl') as writer:
-                for nume_curier, comenzi_alocate in st.session_state.trasee_finale.items():
-                    if comenzi_alocate:
-                        df_traseu = pd.DataFrame(comenzi_alocate)[['Ora_Estimata', 'Nume', 'Telefon', 'Adresa', 'Ramburs']]
-                        
-                        st.subheader(f"Manifest {nume_curier}")
-                        st.metric(label="Total de încasat numerar (Ramburs)", value=f"{st.session_state.starea_curieri[nume_curier]['total_ramburs']} RON")
-                        st.dataframe(df_traseu)
-                        
-                        # Salvăm fiecare curier într-un tab individual în fișierul Excel de export
-                        df_traseu.to_excel(writer, sheet_name=nume_curier, index=False)
-            
-            st.download_button(
-                label="📥 Descarcă Manifest Livrări complet (Excel)",
-                data=excel_data.getvalue(),
-                file_name=f"Manifest_Rute_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # Generare foi de parcurs
+            for nume_curier, comenzi in st.session_state.trasee_finale.items():
+                if comenzi:
+                    st.subheader(f"📋 Traseu {nume_curier}")
+                    st.metric("Total Încasat Cash", f"{st.session_state.starea_curieri[nume_curier]['total_ramburs']} RON")
+                    st.dataframe(pd.DataFrame(comenzi)[['Ora_Estimata', 'Nume', 'Telefon', 'Adresa', 'Ramburs']])
